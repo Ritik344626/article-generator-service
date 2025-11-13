@@ -25,7 +25,11 @@ export class UserController {
                 return createResponse(res, { status: false, payload: 'User creation failed' });
             }
             const { user, token } = result;
-            const payload = formatUser(user, token);
+            const payload = {
+                user: formatUser(user),
+                token: token,
+                samvida_token: user.samvida_token
+            };
             return createResponse(res, { status: true, payload });
     }
 

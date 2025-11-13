@@ -41,12 +41,10 @@ export const hashPassword = async (plainPassword: string): Promise<string> => {
     }
 }
 
-export const formatUser = (user: User, token?: string) => ({
+export const formatUser = (user: User) => ({
     id: user.id,
     email: user.email,
     name: user.name,
-    samvida_token: (user as any).samvida_token || null,
-    token: token || null,
     user_nicename: (user as any).user_nicename || null,
     user_display_name: (user as any).user_display_name || null,
     roles: user.roles || [],
