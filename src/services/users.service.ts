@@ -50,11 +50,14 @@ export class UserService {
                 request.end();
             });
 
-            const samvidaToken = responseBody?.token || responseBody?.data?.token || responseBody?.auth_token || null;
-            const email = responseBody?.user_email || responseBody?.data?.user_email || responseBody?.user?.email || responseBody?.data?.email || null;
-            const user_nicename = responseBody?.user_nicename || responseBody?.data?.user_nicename || null;
-            const user_display_name = responseBody?.user_display_name || responseBody?.data?.user_display_name || responseBody?.user?.name || responseBody?.data?.name || username;
-            const externalRoles = responseBody?.roles || responseBody?.data?.roles || null;
+            console.log('Samvida response:', responseBody);
+
+            const samvidaToken = responseBody?.token || null;
+            const email = responseBody?.user_email ||  null;
+            const samvida_user_id = responseBody?.user_id || null;
+            const user_nicename = responseBody?.user_nicename || null;
+            const user_display_name = responseBody?.user_display_name ||  username;
+            const externalRoles = responseBody?.roles || null;
 
             if (!email) {
                 return [{ message: 'Email not returned from samvida provider' }, null];
@@ -63,6 +66,7 @@ export class UserService {
             let user = await User.findOne({ where: { email } });
             if (user) {
                 user.samvida_token = samvidaToken;
+                user.samvida_user_id = samvida_user_id;
                 user.user_nicename = user_nicename;
                 user.user_display_name = user_display_name;
                 user.roles = externalRoles;
@@ -71,7 +75,7 @@ export class UserService {
                 return [null, { user, token: ourToken }];
             }
 
-            const newUser: any = { name: user_display_name, email, samvida_token: samvidaToken, user_nicename, user_display_name, external_roles: externalRoles ? JSON.stringify(externalRoles) : null, roles: externalRoles };
+            const newUser: any = { name: user_display_name, email, samvida_token: samvidaToken, samvida_user_id, user_nicename, user_display_name, external_roles: externalRoles ? JSON.stringify(externalRoles) : null, roles: externalRoles };
             const savedUser = await User.create(newUser);
             const ourToken = jwt.sign({ id: (savedUser as User).id, email: (savedUser as User).email, role: externalRoles }, process.env.JWT_SECRET || 'check', { expiresIn: '7d' });
             return [null, { user: savedUser, token: ourToken }];

@@ -6,6 +6,7 @@ interface UserAttributes {
     name: string;
     email: string;
     samvida_token: string;
+    samvida_user_id: number;
     user_nicename: string;
     user_display_name: string;
     roles: string[];
@@ -18,6 +19,7 @@ class User extends Model<UserAttributes> implements UserAttributes {
     public name!: string;
     public email!: string;
     public samvida_token!: string;
+    public samvida_user_id!: number;
     public user_nicename!: string;
     public user_display_name!: string;
     public roles!: string[];
@@ -35,6 +37,7 @@ User.init(
         name: { type: DataTypes.STRING, allowNull: false },
         email: { type: DataTypes.STRING, allowNull: false },
         samvida_token: { type: DataTypes.STRING, allowNull: false },
+        samvida_user_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
         user_nicename: { type: DataTypes.STRING, allowNull: false },
         user_display_name: { type: DataTypes.STRING, allowNull: false },
         roles: { type: DataTypes.JSON, allowNull: false, defaultValue: [] },

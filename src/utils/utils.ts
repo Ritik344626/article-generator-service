@@ -45,6 +45,7 @@ export const formatUser = (user: User) => ({
     id: user.id,
     email: user.email,
     name: user.name,
+    samvida_user_id: (user as any).samvida_user_id || null,
     user_nicename: (user as any).user_nicename || null,
     user_display_name: (user as any).user_display_name || null,
     roles: user.roles || [],
