@@ -10,6 +10,7 @@ interface ArticleAttributes {
     featured_media_wp_id?: number | null;
     meta?: any;
     pdf_url?: string | null;
+    featured_image_url?: string | null;
     source_text?: string | null;
     tags?: string[] | number[] | null;
     categories?: string[] | number[] | null;
@@ -32,6 +33,7 @@ class Article extends Model<ArticleAttributes> implements ArticleAttributes {
     public featured_media_wp_id!: number | null;
     public meta!: any;
     public pdf_url!: string | null;
+    public featured_image_url!: string | null;
     public source_text!: string | null;
     public tags!: string[] | number[] | null;
     public categories!: string[] | number[] | null;
@@ -59,6 +61,7 @@ Article.init(
         featured_media_wp_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
         meta: { type: DataTypes.JSON, allowNull: true, defaultValue: {} },
         pdf_url: { type: DataTypes.STRING, allowNull: true },
+        featured_image_url: { type: DataTypes.STRING(1000), allowNull: true },
         source_text: { type: DataTypes.TEXT('long'), allowNull: true },
         tags: { type: DataTypes.JSON, allowNull: true, defaultValue: [] },
         categories: { type: DataTypes.JSON, allowNull: true, defaultValue: [] },
