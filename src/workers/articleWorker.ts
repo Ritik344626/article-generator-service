@@ -9,6 +9,8 @@ import sanitizeHtml from 'sanitize-html';
 import FormData from 'form-data';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
+import CloudflareR2Service from '../services/storage.service';
+import { GoogleGenAI } from "@google/genai";
 
 const connection = {
     host: process.env.REDIS_HOST || 'localhost',
@@ -23,8 +25,11 @@ interface JobData {
 
 class ArticleGenerationWorker {
     private worker: Worker;
+    private storageService: CloudflareR2Service;
+    private ai: GoogleGenAI;
 
     constructor() {
+        this.storageService = new CloudflareR2Service();
         this.worker = new Worker('article-generation', this.processJob.bind(this), {
             connection,
             concurrency: parseInt(process.env.WORKER_CONCURRENCY || '2', 10),
@@ -33,6 +38,8 @@ class ArticleGenerationWorker {
                 duration: 60000,
             },
         });
+
+        this.ai = new GoogleGenAI({});
 
         this.worker.on('completed', (job) => {
             logger.info(`Job ${job.id} completed successfully`);
@@ -56,17 +63,19 @@ class ArticleGenerationWorker {
         let tempFilePath: string | null = null;
         let generatedImagePath: string | null = null;
         let generatedImageUrl: string | null = null;
+        let articlePdfUrl: string | null = null;
 
         try {
             const generationJob = await GenerationJob.findByPk(jobId);
             if (!generationJob) {
                 throw new Error(`Job ${jobId} not found in database`);
             }
+            articlePdfUrl = generationJob.pdf_url;
 
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 5);
 
             const { buffer: pdfBuffer, tempFile } = await this.downloadPdf(generationJob);
-            tempFilePath = tempFile;
+            tempFilePath = tempFile; 
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 15);
 
             const finalPrompt = await this.buildPromptForPdf(generationJob);
@@ -118,11 +127,13 @@ class ArticleGenerationWorker {
                 await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 85);
             }
 
+            const resolvedPdfUrl = await this.resolveArticlePdfUrl(articlePdfUrl, tempFilePath, generationJob);
+
             const article = await Article.create({
                 title,
                 content: sanitizedHtml,
                 status: 'draft',
-                pdf_url: generationJob.pdf_url,
+                pdf_url: resolvedPdfUrl || generationJob.pdf_url,
                 source_text: 'Generated from PDF using GPT-4 Vision',
                 ai_model: `${generationJob.provider}/${generationJob.model_name || 'default'}`,
                 ai_prompt: finalPrompt.substring(0, 5000),
@@ -386,8 +397,6 @@ class ArticleGenerationWorker {
         return { articleHtml, imageSummary };
     }
 
-
-
     private async uploadPdfToOpenAI(
         pdfBuffer: Buffer,
         apiKey: string
@@ -430,7 +439,6 @@ class ArticleGenerationWorker {
         return await this.callOpenAIWithUploadedPdf(prompt, fileId, apiKey.api_key, model);
     }
 
-
     private async generateFeaturedImage(
         title: string,
         html: string,
@@ -443,16 +451,28 @@ class ArticleGenerationWorker {
             return null;
         }
 
-        if (provider !== 'openai') {
-            logger.info(`Skipping image generation for provider ${provider}`);
-            return null;
-        }
-
         const prompt = this.buildImagePrompt(title, html);
         if (!prompt) {
             return null;
         }
 
+        switch (provider.toLowerCase()) {
+            case 'openai':
+                return this.callOpenAIImageGeneration(prompt, apiKey, jobId);
+            case 'gemini':
+                return this.generateGeminiImage(prompt, apiKey, jobId);
+            default:
+                logger.info(`Skipping image generation - unsupported provider: ${provider}`);
+                return null;
+        }
+    }
+
+    // New helper method for the existing OpenAI logic
+    private async callOpenAIImageGeneration(
+        prompt: string,
+        apiKey: ApiKey,
+        jobId: number,
+    ): Promise<{ absolutePath: string; fileUrl: string } | null> {
         const model = process.env.IMAGE_GENERATION_MODEL || 'dall-e-3';
         const size = process.env.IMAGE_GENERATION_SIZE || '1024x1024';
 
@@ -479,10 +499,57 @@ class ArticleGenerationWorker {
                 return null;
             }
 
+            // Reuse existing download and save logic
             const buffer = await this.downloadImage(imageUrl, jobId);
             return await this.saveImageBuffer(buffer, jobId);
         } catch (error: any) {
-            logger.warn('Failed to generate featured image', error?.response?.data || error);
+            logger.warn('Failed to generate featured image with OpenAI', error?.response?.data || error);
+            return null;
+        }
+    }
+
+    private async generateGeminiImage(
+        prompt: string,
+        apiKey: ApiKey,
+        jobId: number,
+    ): Promise<{ absolutePath: string; fileUrl: string } | null> {
+        
+        // 🛑 Use the dedicated Imagen model for best results and correct API path
+        const aiClient = new GoogleGenAI({ apiKey: apiKey.api_key });
+        const model = process.env.IMAGE_GENERATION_MODEL || "gemini-2.5-flash-image";
+        const aspectRatio = process.env.IMAGE_GENERATION_SIZE || '1:1'; 
+        
+        // The SDK handles endpoint, versioning, and JSON payload correctly.
+        try {
+            const modelList = await aiClient.models.list();
+
+            console.dir({modelList}, {depth: 4});
+
+            const response = await aiClient.models.generateImages({
+                model: model,
+                prompt: prompt,
+                config: { 
+                    numberOfImages: 1,
+                    aspectRatio: aspectRatio, 
+                    outputMimeType: "image/png",
+                },
+            });
+
+            // The SDK response structure for generateImages is simple
+            const base64Image = response.generatedImages?.[0]?.image?.imageBytes;
+
+            if (!base64Image) {
+                logger.warn('Gemini SDK image response missing Base64 payload', response);
+                return null;
+            }
+
+            // Decode Base64 and save (reuse your existing logic)
+            const buffer = Buffer.from(base64Image, 'base64');
+            return await this.saveImageBuffer(buffer, jobId);
+
+        } catch (error: any) {
+            // Error handling will catch SDK-specific errors as well
+            logger.warn('Failed to generate featured image with Gemini SDK', error);
             return null;
         }
     }
@@ -545,6 +612,34 @@ class ArticleGenerationWorker {
         logger.info(`Featured image stored at ${absolutePath}`);
 
         return { absolutePath, fileUrl };
+    }
+
+    private async resolveArticlePdfUrl(
+        currentUrl: string | null,
+        tempFilePath: string | null,
+        job: GenerationJob
+    ): Promise<string | null> {
+        if (!this.storageService.isEnabled()) {
+            return currentUrl;
+        }
+
+        if (!tempFilePath) {
+            return currentUrl;
+        }
+
+        if (!currentUrl || !currentUrl.startsWith('file://')) {
+            return currentUrl;
+        }
+
+        try {
+            const keyPrefix = path.posix.join('users', String(job.user_id));
+            const uploadResult = await this.storageService.uploadPdfFromPath(tempFilePath, keyPrefix);
+            logger.info(`Uploaded PDF for job ${job.id} to Cloudflare R2`);
+            return uploadResult.url;
+        } catch (error) {
+            logger.warn(`Failed to upload PDF for job ${job.id} to Cloudflare R2`, error);
+            return currentUrl;
+        }
     }
 
 
