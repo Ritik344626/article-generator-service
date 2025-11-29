@@ -3,12 +3,13 @@ import { GenerationJob, JobStatus } from '../models/GenerationJob';
 import { Article } from '../models/Article';
 import { Prompt } from '../models/Prompt';
 import { ApiKey } from '../models/ApiKey';
+import { User } from '../models/User';
 import logger from '../utils/logger';
 import axios from 'axios';
 import sanitizeHtml from 'sanitize-html';
 import FormData from 'form-data';
 import path from 'path';
-import { promises as fsPromises } from 'fs';
+import { promises as fsPromises, createReadStream } from 'fs';
 import CloudflareR2Service from '../services/storage.service';
 import { GoogleGenAI } from "@google/genai";
 
@@ -23,13 +24,31 @@ interface JobData {
     uuid: string;
 }
 
+interface WordPressMediaContext {
+    imagePath: string | null;
+    imageUrl: string | null;
+}
+
+interface WordPressPostPayload {
+    title: string;
+    content: string;
+    status?: string;
+    author?: number | null;
+    featured_media?: number | null | undefined;
+    meta?: Record<string, any> | null;
+    tags?: Array<number | string> | null;
+    categories?: Array<number | string> | null;
+}
+
 class ArticleGenerationWorker {
     private worker: Worker;
     private storageService: CloudflareR2Service;
     private ai: GoogleGenAI;
+    private wpBaseUrl: string;
 
     constructor() {
         this.storageService = new CloudflareR2Service();
+        this.wpBaseUrl = process.env.WP_BASE_URL || 'https://www.samvidalaw.com';
         this.worker = new Worker('article-generation', this.processJob.bind(this), {
             connection,
             concurrency: parseInt(process.env.WORKER_CONCURRENCY || '2', 10),
@@ -103,8 +122,6 @@ class ArticleGenerationWorker {
 
             const title = this.extractTitle(sanitizedHtml) || 'Generated Article';
 
-            console.log({imageSummary})
-
             let imageContextForPrompt = (imageSummary && imageSummary.trim().length > 0)
                 ? imageSummary
                 : sanitizedHtml;
@@ -148,15 +165,15 @@ class ArticleGenerationWorker {
 
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 90);
 
-            // Step 9: Optionally publish to WordPress
             if (generationJob.publish_to_wp) {
-                await this.publishToWordPress(article, generationJob);
+                await this.publishToWordPress(article, generationJob, {
+                    imagePath: generatedImagePath,
+                    imageUrl: generatedImageUrl,
+                });
             }
 
-            // Step 10: Update API key usage
             await this.updateApiKeyUsage(apiKey);
 
-            // Step 11: Mark job as completed
             generationJob.status = JobStatus.COMPLETED;
             generationJob.progress = 100;
             generationJob.result_article_id = article.id;
@@ -522,10 +539,6 @@ class ArticleGenerationWorker {
         
         // The SDK handles endpoint, versioning, and JSON payload correctly.
         try {
-            const modelList = await aiClient.models.list();
-
-            console.dir({modelList}, {depth: 4});
-
             const response = await aiClient.models.generateImages({
                 model: model,
                 prompt: prompt,
@@ -675,34 +688,164 @@ class ArticleGenerationWorker {
         return null;
     }
 
-    private async publishToWordPress(article: Article, job: GenerationJob): Promise<void> {
+    private async publishToWordPress(
+        article: Article,
+        job: GenerationJob,
+        mediaContext: WordPressMediaContext = { imagePath: null, imageUrl: null }
+    ): Promise<void> {
         try {
-            logger.info(`Publishing article ${article.id} to WordPress (not implemented)`);
+            const wpUser = await User.findByPk(job.user_id);
+            if (!wpUser) {
+                throw new Error(`Unable to publish to WordPress: user ${job.user_id} not found`);
+            }
 
-            // Example implementation:
-            // const wpResponse = await axios.post(
-            //   `${process.env.WP_URL}/wp-json/wp/v2/posts`,
-            //   {
-            //     title: article.title,
-            //     content: article.content,
-            //     status: 'draft',
-            //     author: job.wp_config?.author_wp_id,
-            //     featured_media: job.wp_config?.featured_media_wp_id,
-            //     meta: job.wp_config?.meta,
-            //   },
-            //   {
-            //     headers: {
-            //       'Authorization': `Bearer ${wpToken}`,
-            //     },
-            //   }
-            // );
+            if (!wpUser.samvida_token) {
+                throw new Error(`Unable to publish to WordPress: user ${job.user_id} missing Samvida token`);
+            }
 
-            // article.wp_post_id = wpResponse.data.id;
-            // article.wp_permalink = wpResponse.data.link;
-            // await article.save();
+            const token = wpUser.samvida_token;
+            let featuredMediaId = article.featured_media_wp_id || job.wp_config?.featured_media_wp_id || null;
+
+            if (!featuredMediaId && (mediaContext?.imagePath || mediaContext?.imageUrl)) {
+                logger.info(`Uploading featured image for article ${article.id} to WordPress`);
+                const uploadResult = await this.uploadImageToWordPress(token, mediaContext.imagePath, mediaContext.imageUrl);
+                featuredMediaId = uploadResult.mediaId;
+                article.featured_media_wp_id = uploadResult.mediaId;
+                article.featured_image_url = uploadResult.sourceUrl;
+                await article.save();
+            }
+
+            const wpPostPayload: WordPressPostPayload = {
+                title: article.title,
+                content: article.content,
+                status: 'draft',
+                author: job.wp_config?.author_wp_id || wpUser.samvida_user_id || null,
+                featured_media: featuredMediaId,
+                meta: job.wp_config?.meta || null,
+                tags: job.wp_config?.tags || null,
+                categories: job.wp_config?.categories || null,
+            };
+
+            const wpPost = await this.createWordPressDraft(token, wpPostPayload);
+
+            article.wp_post_id = wpPost.id;
+            article.wp_permalink = wpPost.link;
+            article.status = wpPost.status || article.status;
+            article.author_wp_id = wpPost.author ?? article.author_wp_id;
+            await article.save();
+
+            logger.info(`Article ${article.id} pushed to WordPress post ${wpPost.id}`);
         } catch (error: any) {
-            logger.error('Error publishing to WordPress:', error);
+            logger.error('Error publishing to WordPress:', error?.response?.data || error?.message || error);
+            const existingError = article.error && typeof article.error === 'object' ? article.error : {};
+            article.error = {
+                ...existingError,
+                wordpress: error?.response?.data || { message: error?.message || 'WordPress publish failed' },
+            };
+            await article.save();
+            throw error;
         }
+    }
+
+    private getWordPressEndpoint(pathname: string): string {
+        const base = this.wpBaseUrl.replace(/\/+$/, '');
+        const suffix = pathname.startsWith('/') ? pathname : `/${pathname}`;
+        return `${base}${suffix}`;
+    }
+
+    private async uploadImageToWordPress(
+        token: string,
+        imagePath?: string | null,
+        fallbackUrl?: string | null
+    ): Promise<{ mediaId: number; sourceUrl: string }> {
+        if (!imagePath && !fallbackUrl) {
+            throw new Error('No image available to upload to WordPress');
+        }
+
+        const formData = new FormData();
+        const fileName = imagePath ? path.basename(imagePath) : `article-${Date.now()}.png`;
+
+        if (imagePath) {
+            formData.append('file', createReadStream(imagePath), { filename: fileName });
+        } else if (fallbackUrl) {
+            const response = await axios.get(fallbackUrl, {
+                responseType: 'arraybuffer',
+                timeout: 120000,
+            });
+            formData.append('file', Buffer.from(response.data), { filename: fileName });
+        }
+
+        const wpResponse = await axios.post(
+            this.getWordPressEndpoint('/wp-json/wp/v2/media'),
+            formData,
+            {
+                headers: {
+                    ...formData.getHeaders(),
+                    Authorization: `Bearer ${token}`,
+                },
+                maxBodyLength: Infinity,
+                maxContentLength: Infinity,
+                timeout: 120000,
+            }
+        );
+
+        const mediaId = wpResponse.data?.id;
+        const sourceUrl = wpResponse.data?.source_url || wpResponse.data?.guid?.rendered;
+
+        if (!mediaId || !sourceUrl) {
+            logger.warn('Unexpected WordPress media response', wpResponse.data);
+            throw new Error('WordPress media upload failed: missing id/source_url');
+        }
+
+        logger.info(`Uploaded featured image to WordPress media ${mediaId}`);
+        return { mediaId, sourceUrl };
+    }
+
+    private sanitizeWordPressPayload(payload: WordPressPostPayload): Record<string, any> {
+        const body: Record<string, any> = {
+            title: payload.title,
+            content: payload.content,
+            status: payload.status || 'draft',
+        };
+
+        if (payload.author !== undefined && payload.author !== null) {
+            body.author = payload.author;
+        }
+
+        if (payload.featured_media !== undefined && payload.featured_media !== null) {
+            body.featured_media = payload.featured_media;
+        }
+
+        if (payload.meta && typeof payload.meta === 'object' && Object.keys(payload.meta).length > 0) {
+            body.meta = payload.meta;
+        }
+
+        if (Array.isArray(payload.tags) && payload.tags.length > 0) {
+            body.tags = payload.tags;
+        }
+
+        if (Array.isArray(payload.categories) && payload.categories.length > 0) {
+            body.categories = payload.categories;
+        }
+
+        return body;
+    }
+
+    private async createWordPressDraft(token: string, payload: WordPressPostPayload): Promise<any> {
+        const body = this.sanitizeWordPressPayload(payload);
+        const response = await axios.post(
+            this.getWordPressEndpoint('/wp-json/wp/v2/posts'),
+            body,
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
+                },
+                timeout: 120000,
+            }
+        );
+
+        return response.data;
     }
 
     private async updateApiKeyUsage(apiKey: ApiKey): Promise<void> {

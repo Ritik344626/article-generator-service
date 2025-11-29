@@ -62,7 +62,7 @@ export class GenerationService {
         status: JobStatus.PENDING,
         progress: 0,
         attempts: 0,
-        publish_to_wp: input.publish_to_wp || false,
+        publish_to_wp: input.publish_to_wp || true,
         wp_config: input.wp_config || null,
       } as any);
 
