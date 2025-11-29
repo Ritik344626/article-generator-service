@@ -7,6 +7,7 @@ const controller = new ArticleController();
 
 articleRouter.use(passport.authenticate('jwt', { session: false }));
 
+articleRouter.get('/stats', controller.getStats.bind(controller));
 articleRouter.get('/', controller.list.bind(controller));
 
 export default articleRouter;

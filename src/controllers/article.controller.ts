@@ -36,6 +36,19 @@ export class ArticleController {
             });
         }
     }
+
+    async getStats(req: Request, res: Response) {
+        try {
+            const stats = await this.feedService.getArticleStats();
+            return createResponse(res, { status: true, payload: stats });
+        } catch (error: any) {
+            return createResponse(res, {
+                status: false,
+                payload: { message: error.message },
+                code: 400,
+            });
+        }
+    }
 }
 
 export default ArticleController;

@@ -25,6 +25,7 @@ interface ArticleFeedRow {
     featured_image_url: string | null;
     pdf_url: string | null;
     provider: string | null;
+    prompt_category: string | null;
 }
 
 export class ArticleFeedService {
@@ -89,8 +90,10 @@ export class ArticleFeedService {
                     a.updatedAt AS updated_at,
                     a.featured_image_url AS featured_image_url,
                     a.pdf_url AS pdf_url,
-                    NULL AS provider
+                    NULL AS provider,
+                    p.category AS prompt_category
                 FROM articles a
+                LEFT JOIN prompts p ON a.prompt_template_id = p.id
                 ${articleWhereClause}
             `);
         }
@@ -108,7 +111,8 @@ export class ArticleFeedService {
                     gj.updatedAt AS updated_at,
                     NULL AS featured_image_url,
                     gj.pdf_url AS pdf_url,
-                    gj.provider AS provider
+                    gj.provider AS provider,
+                    gj.prompt_category AS prompt_category
                 FROM generation_jobs gj
                 ${jobWhereClause}
             `);
@@ -159,7 +163,35 @@ export class ArticleFeedService {
                 featured_image_url: row.featured_image_url,
                 pdf_url: row.pdf_url,
                 provider: row.provider,
+                prompt_category: row.prompt_category,
             })),
+        };
+    }
+
+    /**
+     * Get article statistics for dashboard
+     */
+    async getArticleStats() {
+        const query = `
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) as draft,
+                SUM(CASE WHEN status = 'publish' THEN 1 ELSE 0 END) as published,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+            FROM articles
+        `;
+
+        const [results] = await sequelize.query<any>(query, { type: QueryTypes.SELECT });
+
+        return {
+            total: parseInt(results?.total || 0),
+            draft: parseInt(results?.draft || 0),
+            published: parseInt(results?.published || 0),
+            pending: parseInt(results?.pending || 0),
+            processing: parseInt(results?.processing || 0),
+            failed: parseInt(results?.failed || 0),
         };
     }
 }

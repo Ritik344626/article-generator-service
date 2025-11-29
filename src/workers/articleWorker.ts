@@ -133,6 +133,7 @@ class ArticleGenerationWorker {
                 title,
                 content: sanitizedHtml,
                 status: 'draft',
+                prompt_template_id: generationJob.prompt_template_id || null,
                 pdf_url: resolvedPdfUrl || generationJob.pdf_url,
                 source_text: 'Generated from PDF using GPT-4 Vision',
                 ai_model: `${generationJob.provider}/${generationJob.model_name || 'default'}`,

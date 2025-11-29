@@ -39,7 +39,7 @@ export class ApiKeyService {
         id: k.id,
         provider: k.provider,
         model_name: k.model_name,
-        api_key_masked: maskKey(k.api_key),
+        api_key: k.api_key,
         status: k.status,
         usage_limit: k.usage_limit,
         usage_count: k.usage_count,
@@ -94,7 +94,7 @@ export class ApiKeyService {
       if (details.usage_limit !== undefined) key.usage_limit = details.usage_limit;
 
       await key.save();
-      return [null, { id: key.id, provider: key.provider, model_name: key.model_name, api_key_masked: maskKey(key.api_key), status: key.status, usage_limit: key.usage_limit, usage_count: key.usage_count, last_used_at: key.last_used_at, created_by: key.created_by }];
+      return [null, { id: key.id, provider: key.provider, model_name: key.model_name, api_key: key.api_key, status: key.status, usage_limit: key.usage_limit, usage_count: key.usage_count, last_used_at: key.last_used_at, created_by: key.created_by }];
     } catch (error) {
       logger.error('Error updating API key', error);
       return [error, null];
