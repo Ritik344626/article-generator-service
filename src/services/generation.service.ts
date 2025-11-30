@@ -8,6 +8,7 @@ import { generationQueue } from '../workers/queue';
 interface CreateJobInput {
   pdf_url?: string;
   pdf_file_path?: string;
+  pdf_link?: string;
   prompt_template_id?: number;
   prompt_category?: string;
   custom_prompt?: string;
@@ -15,6 +16,7 @@ interface CreateJobInput {
   model_provider?: string;
   model_name?: string;
   publish_to_wp?: boolean;
+  generate_hindi_article?: boolean;
   wp_config?: {
     author_wp_id?: number;
     featured_media_wp_id?: number;
@@ -30,8 +32,8 @@ export class GenerationService {
   async createJob(input: CreateJobInput, userId: number): Promise<[any, GenerationJob | null]> {
     try {
       // Validate input
-      if (!input.pdf_url && !input.pdf_file_path) {
-        return [{ message: 'Either pdf_url or uploaded file is required' }, null];
+      if (!input.pdf_url && !input.pdf_file_path && !input.pdf_link) {
+        return [{ message: 'Provide either pdf_url, pdf_link, or upload a file' }, null];
       }
 
       if (!input.prompt_template_id && !input.prompt_category && !input.custom_prompt) {
@@ -42,7 +44,7 @@ export class GenerationService {
       const provider = input.model_provider || 'openai';
       
       // Convert file path to file:// URL if uploaded
-      let pdfUrl = input.pdf_url || '';
+      let pdfUrl = input.pdf_url || input.pdf_link || '';
       if (!pdfUrl && input.pdf_file_path) {
         // Convert absolute path to file:// URL
         pdfUrl = `file://${input.pdf_file_path}`;
@@ -63,6 +65,7 @@ export class GenerationService {
         progress: 0,
         attempts: 0,
         publish_to_wp: input.publish_to_wp || true,
+        generate_hindi_article: input.generate_hindi_article === true,
         wp_config: input.wp_config || null,
       } as any);
 
