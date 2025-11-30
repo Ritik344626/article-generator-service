@@ -30,6 +30,7 @@ interface GenerationJobAttributes {
   attempts: number;
   publish_to_wp: boolean;
   wp_config?: any | null;
+  generate_hindi_article: boolean;
   started_at?: Date | null;
   finished_at?: Date | null;
   createdAt?: Date;
@@ -58,6 +59,7 @@ class GenerationJob extends Model<GenerationJobAttributes> implements Generation
   public attempts!: number;
   public publish_to_wp!: boolean;
   public wp_config!: any | null;
+  public generate_hindi_article!: boolean;
   public started_at!: Date | null;
   public finished_at!: Date | null;
   public readonly createdAt?: Date;
@@ -145,6 +147,11 @@ GenerationJob.init({
     defaultValue: 0,
   },
   publish_to_wp: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
+  },
+  generate_hindi_article: {
     type: DataTypes.BOOLEAN,
     allowNull: false,
     defaultValue: false,

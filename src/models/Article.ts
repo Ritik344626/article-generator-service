@@ -7,6 +7,7 @@ interface ArticleAttributes {
     content: string;
     status: string;
     prompt_template_id?: number | null;
+    translation_of_article_id?: number | null;
     author_wp_id?: number | null;
     featured_media_wp_id?: number | null;
     meta?: any;
@@ -31,6 +32,7 @@ class Article extends Model<ArticleAttributes> implements ArticleAttributes {
     public content!: string;
     public status!: string;
     public prompt_template_id!: number | null;
+    public translation_of_article_id!: number | null;
     public author_wp_id!: number | null;
     public featured_media_wp_id!: number | null;
     public meta!: any;
@@ -60,6 +62,7 @@ Article.init(
         content: { type: DataTypes.TEXT('long'), allowNull: false },
         status: { type: DataTypes.STRING, allowNull: false, defaultValue: 'draft' },
         prompt_template_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
+        translation_of_article_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
         author_wp_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
         featured_media_wp_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true },
         meta: { type: DataTypes.JSON, allowNull: true, defaultValue: {} },

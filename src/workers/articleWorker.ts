@@ -27,6 +27,7 @@ interface JobData {
 interface WordPressMediaContext {
     imagePath: string | null;
     imageUrl: string | null;
+    existingMediaId?: number | null;
 }
 
 interface WordPressPostPayload {
@@ -146,6 +147,14 @@ class ArticleGenerationWorker {
 
             const resolvedPdfUrl = await this.resolveArticlePdfUrl(articlePdfUrl, tempFilePath, generationJob);
 
+            const baseMeta = this.applySeoDefaults(
+                generationJob.wp_config?.meta,
+                title,
+                sanitizedHtml
+            );
+            const wpTags = Array.isArray(generationJob.wp_config?.tags) ? generationJob.wp_config?.tags : [];
+            const wpCategories = Array.isArray(generationJob.wp_config?.categories) ? generationJob.wp_config?.categories : [];
+
             const article = await Article.create({
                 title,
                 content: sanitizedHtml,
@@ -157,10 +166,11 @@ class ArticleGenerationWorker {
                 ai_prompt: finalPrompt.substring(0, 5000),
                 author_wp_id: generationJob.wp_config?.author_wp_id || null,
                 featured_media_wp_id: generationJob.wp_config?.featured_media_wp_id || null,
-                meta: generationJob.wp_config?.meta || {},
-                tags: generationJob.wp_config?.tags || [],
-                categories: generationJob.wp_config?.categories || [],
+                meta: baseMeta,
+                tags: wpTags,
+                categories: wpCategories,
                 featured_image_url: generatedImageUrl,
+                translation_of_article_id: null,
             } as any);
 
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 90);
@@ -170,6 +180,62 @@ class ArticleGenerationWorker {
                     imagePath: generatedImagePath,
                     imageUrl: generatedImageUrl,
                 });
+            }
+
+            let hindiArticle: Article | null = null;
+            if (generationJob.generate_hindi_article) {
+                await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 92);
+
+                const hindiHtml = await this.translateArticleToHindi(
+                    sanitizedHtml,
+                    apiKey,
+                    generationJob.provider,
+                    generationJob.model_name
+                );
+
+                const sanitizedHindiHtml = this.sanitizeHtml(hindiHtml);
+                const hindiTitle = this.extractTitle(sanitizedHindiHtml) || `${title} (Hindi)`;
+
+                const hindiMetaBase = this.cloneMeta(generationJob.wp_config?.meta);
+                hindiMetaBase.translation_language = 'hi';
+                hindiMetaBase.translation_of_article_id = article.id;
+                const hindiMeta = this.applySeoDefaults(
+                    hindiMetaBase,
+                    hindiTitle,
+                    sanitizedHindiHtml
+                );
+
+                hindiArticle = await Article.create({
+                    title: hindiTitle,
+                    content: sanitizedHindiHtml,
+                    status: 'draft',
+                    pdf_url: resolvedPdfUrl || generationJob.pdf_url,
+                    source_text: `Hindi translation of article ${article.id}`,
+                    ai_model: `${generationJob.provider}/${generationJob.model_name || 'default'}`,
+                    ai_prompt: 'Hindi translation of generated article',
+                    author_wp_id: generationJob.wp_config?.author_wp_id || null,
+                    featured_media_wp_id: article.featured_media_wp_id || generationJob.wp_config?.featured_media_wp_id || null,
+                    meta: hindiMeta,
+                    tags: wpTags,
+                    categories: wpCategories,
+                    featured_image_url: article.featured_image_url,
+                    translation_of_article_id: article.id,
+                } as any);
+
+                if (generationJob.publish_to_wp) {
+                    await this.publishToWordPress(hindiArticle, generationJob, {
+                        imagePath: generatedImagePath,
+                        imageUrl: generatedImageUrl,
+                        existingMediaId: article.featured_media_wp_id || generationJob.wp_config?.featured_media_wp_id || null,
+                    });
+                }
+
+                await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 95);
+
+                const englishMeta = this.applySeoDefaults(article.meta, title, sanitizedHtml);
+                englishMeta.hindi_translation_article_id = hindiArticle.id;
+                article.meta = englishMeta;
+                await article.save();
             }
 
             await this.updateApiKeyUsage(apiKey);
@@ -239,30 +305,74 @@ class ArticleGenerationWorker {
 
     private async downloadPdf(job: GenerationJob): Promise<{ buffer: Buffer; tempFile: string | null }> {
         try {
-            // Check if it's a local file:// URL
             if (job.pdf_url.startsWith('file://')) {
                 const fs = await import('fs');
                 const filePath = job.pdf_url.replace('file://', '');
                 logger.info(`Reading PDF from local file: ${filePath}`);
                 const buffer = fs.readFileSync(filePath);
-
-                // Return buffer and file path for cleanup later
                 return { buffer, tempFile: filePath };
             }
 
-            // Download PDF from URL directly to memory
-            const response = await axios.get(job.pdf_url, {
-                responseType: 'arraybuffer',
-                timeout: 60000,
-                maxContentLength: 50 * 1024 * 1024, // 50MB max
-            });
-
-            logger.info(`PDF downloaded from URL (${Buffer.byteLength(response.data)} bytes)`);
-            return { buffer: Buffer.from(response.data), tempFile: null };
+            const buffer = await this.fetchRemotePdf(job.pdf_url);
+            return { buffer, tempFile: null };
         } catch (error: any) {
-            logger.error('Error downloading PDF:', error);
-            throw new Error(`Failed to download PDF: ${error.message}`);
+            logger.error('Error downloading PDF:', error?.response?.data || error?.message || error);
+            throw new Error(`Failed to download PDF: ${error?.message || 'Unknown error'}`);
         }
+    }
+
+    private buildPdfRequestHeaders(targetUrl: string): Record<string, string> {
+        const headers: Record<string, string> = {
+            'User-Agent': process.env.PDF_FETCH_USER_AGENT || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/pdf,application/octet-stream;q=0.9,*/*;q=0.8',
+            'Accept-Language': process.env.PDF_FETCH_ACCEPT_LANGUAGE || 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+        };
+
+        const refererOverride = process.env.PDF_FETCH_REFERER;
+        if (refererOverride) {
+            headers['Referer'] = refererOverride;
+        } else {
+            try {
+                const url = new URL(targetUrl);
+                headers['Referer'] = url.origin;
+            } catch (error) {
+                logger.warn('Failed to derive referer from URL', error);
+            }
+        }
+
+        if (process.env.PDF_FETCH_AUTH_HEADER) {
+            headers['Authorization'] = process.env.PDF_FETCH_AUTH_HEADER;
+        }
+
+        if (process.env.PDF_FETCH_COOKIE) {
+            headers['Cookie'] = process.env.PDF_FETCH_COOKIE;
+        }
+
+        return headers;
+    }
+
+    private async fetchRemotePdf(url: string): Promise<Buffer> {
+        const headers = this.buildPdfRequestHeaders(url);
+
+        const response = await axios.get(url, {
+            responseType: 'arraybuffer',
+            timeout: Number(process.env.PDF_FETCH_TIMEOUT_MS || 60000),
+            maxContentLength: 50 * 1024 * 1024,
+            maxRedirects: 5,
+            headers,
+            validateStatus: (status) => status >= 200 && status < 400,
+        });
+
+        const contentType = response.headers['content-type'];
+        if (contentType && !contentType.toLowerCase().includes('pdf')) {
+            logger.warn(`Remote content-type is ${contentType}, expected application/pdf`);
+        }
+
+        const byteLength = Buffer.byteLength(response.data);
+        logger.info(`PDF downloaded from URL (${byteLength} bytes)`);
+        return Buffer.from(response.data);
     }
 
     private async buildPromptForPdf(job: GenerationJob): Promise<string> {
@@ -455,6 +565,69 @@ class ArticleGenerationWorker {
         logger.info(`PDF uploaded → ${fileId}`);
 
         return await this.callOpenAIWithUploadedPdf(prompt, fileId, apiKey.api_key, model);
+    }
+
+    private async translateArticleToHindi(
+        htmlContent: string,
+        apiKey: ApiKey,
+        provider: string,
+        modelName?: string | null
+    ): Promise<string> {
+        if (!htmlContent?.trim()) {
+            throw new Error('Cannot translate empty article content');
+        }
+
+        if (provider !== 'openai') {
+            throw new Error('Hindi translation currently supports only the OpenAI provider');
+        }
+
+        const model = modelName || 'gpt-4.1-mini';
+        const systemPrompt = `You are a professional legal translator. Translate the provided HTML article into Hindi.
+Keep every HTML tag, attribute, number, and formatting exactly the same, only change the human-readable text to Hindi.
+Do not summarize, omit, or add any content. Return ONLY the translated HTML, with no explanations.`;
+
+        const response = await axios.post(
+            'https://api.openai.com/v1/responses',
+            {
+                model,
+                input: [
+                    {
+                        role: 'system',
+                        content: [
+                            {
+                                type: 'input_text',
+                                text: systemPrompt,
+                            },
+                        ],
+                    },
+                    {
+                        role: 'user',
+                        content: [
+                            {
+                                type: 'input_text',
+                                text: htmlContent,
+                            },
+                        ],
+                    },
+                ],
+                max_output_tokens: 8000,
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${apiKey.api_key}`,
+                    'Content-Type': 'application/json',
+                },
+                timeout: 180000,
+            }
+        );
+
+        const translatedHtml = response.data?.output?.[0]?.content?.[0]?.text?.trim();
+        if (!translatedHtml) {
+            logger.error('Hindi translation failed, unexpected response', response.data);
+            throw new Error('Failed to translate article to Hindi');
+        }
+
+        return translatedHtml;
     }
 
     private async generateFeaturedImage(
@@ -680,6 +853,38 @@ class ArticleGenerationWorker {
         });
     }
 
+    private cloneMeta(meta: any): Record<string, any> {
+        if (!meta || typeof meta !== 'object') {
+            return {};
+        }
+
+        try {
+            return JSON.parse(JSON.stringify(meta));
+        } catch (error) {
+            logger.warn('Failed to deep-clone meta payload, falling back to shallow copy');
+            return { ...meta };
+        }
+    }
+
+    private applySeoDefaults(metaInput: any, title: string, htmlContent: string): Record<string, any> {
+        const meta = this.cloneMeta(metaInput);
+
+        const titleCandidate = typeof meta.rank_math_title === 'string' ? meta.rank_math_title.trim() : '';
+        if (!titleCandidate) {
+            meta.rank_math_title = title;
+        }
+
+        const descriptionCandidate = typeof meta.rank_math_description === 'string'
+            ? meta.rank_math_description.trim()
+            : '';
+        if (!descriptionCandidate) {
+            const plain = this.stripHtml(htmlContent || '').slice(0, 300).trim();
+            meta.rank_math_description = plain;
+        }
+
+        return meta;
+    }
+
     private extractTitle(html: string): string | null {
         const h1Match = html.match(/<h1[^>]*>(.*?)<\/h1>/i);
         if (h1Match) {
@@ -691,7 +896,7 @@ class ArticleGenerationWorker {
     private async publishToWordPress(
         article: Article,
         job: GenerationJob,
-        mediaContext: WordPressMediaContext = { imagePath: null, imageUrl: null }
+        mediaContext: WordPressMediaContext = { imagePath: null, imageUrl: null, existingMediaId: null }
     ): Promise<void> {
         try {
             const wpUser = await User.findByPk(job.user_id);
@@ -704,7 +909,18 @@ class ArticleGenerationWorker {
             }
 
             const token = wpUser.samvida_token;
-            let featuredMediaId = article.featured_media_wp_id || job.wp_config?.featured_media_wp_id || null;
+            let featuredMediaId = mediaContext?.existingMediaId
+                ?? article.featured_media_wp_id
+                ?? job.wp_config?.featured_media_wp_id
+                ?? null;
+
+            if (mediaContext?.existingMediaId && !article.featured_media_wp_id) {
+                article.featured_media_wp_id = mediaContext.existingMediaId;
+                if (mediaContext.imageUrl && !article.featured_image_url) {
+                    article.featured_image_url = mediaContext.imageUrl;
+                }
+                await article.save();
+            }
 
             if (!featuredMediaId && (mediaContext?.imagePath || mediaContext?.imageUrl)) {
                 logger.info(`Uploading featured image for article ${article.id} to WordPress`);
@@ -721,7 +937,7 @@ class ArticleGenerationWorker {
                 status: 'draft',
                 author: job.wp_config?.author_wp_id || wpUser.samvida_user_id || null,
                 featured_media: featuredMediaId,
-                meta: job.wp_config?.meta || null,
+                meta: this.applySeoDefaults(article.meta, article.title, article.content),
                 tags: job.wp_config?.tags || null,
                 categories: job.wp_config?.categories || null,
             };
