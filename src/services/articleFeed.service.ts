@@ -1,6 +1,7 @@
 import { QueryTypes } from 'sequelize';
 import { sequelize } from '../config/database';
 import { JobStatus } from '../models/GenerationJob';
+import { ApiKey } from '../models/ApiKey';
 
 export interface ArticleFeedQuery {
     page?: number;
@@ -185,6 +186,19 @@ export class ArticleFeedService {
 
         const [results] = await sequelize.query<any>(query, { type: QueryTypes.SELECT });
 
+        // Fetch global OpenAI API key credits to show on dashboard card
+        const apiKey = await ApiKey.findOne({
+            where: { provider: 'openai', status: 'active' },
+            order: [["credits_remaining_usd_month", "DESC"]],
+        });
+
+        const limit = apiKey ? Number((apiKey as any).credits_monthly_limit_usd ?? 0) : null;
+        const remaining = apiKey ? Number((apiKey as any).credits_remaining_usd_month ?? 0) : null;
+        const used = apiKey ? Number((apiKey as any).credits_used_usd_month ?? (limit != null ? (limit - (remaining || 0)) : 0)) : null;
+        const percent_remaining = limit && limit > 0 && remaining != null
+            ? Number(((remaining / limit) * 100).toFixed(2))
+            : null;
+
         return {
             total: parseInt(results?.total || 0),
             draft: parseInt(results?.draft || 0),
@@ -192,6 +206,14 @@ export class ArticleFeedService {
             pending: parseInt(results?.pending || 0),
             processing: parseInt(results?.processing || 0),
             failed: parseInt(results?.failed || 0),
+            credits: {
+                provider: apiKey?.provider || 'openai',
+                // limit_usd: limit,
+                // used_usd: used,
+                remaining_usd: remaining,
+                // percent_remaining,
+                // month_start: (apiKey as any)?.credits_month_start || null,
+            },
         };
     }
 }

@@ -46,6 +46,15 @@ export class GenerationController {
         return createResponse(res, { status: false, payload: error, code: 400 });
       }
 
+      // Low credit warning at click-time (global API key credit tracking)
+      let lowCreditWarning: boolean | undefined = undefined;
+      try {
+        const apiKey = await this.generationService.selectApiKey(input.model_provider || 'openai', authUser.id);
+        const monthlyLimit = Number((apiKey as any)?.credits_monthly_limit_usd ?? 100);
+        const remaining = Number((apiKey as any)?.credits_remaining_usd_month ?? monthlyLimit);
+        lowCreditWarning = remaining <= monthlyLimit * 0.2;
+      } catch {}
+
       return createResponse(res, {
         status: true,
         code: 202,
@@ -55,6 +64,7 @@ export class GenerationController {
           progress: job!.progress,
           createdAt: job!.createdAt,
           detail_url: `/api/v1/generate/${job!.uuid}`,
+          low_credit_warning: lowCreditWarning,
         },
       });
     } catch (error: any) {

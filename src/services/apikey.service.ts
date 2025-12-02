@@ -12,6 +12,7 @@ export class ApiKeyService {
 
   async createKey(details: Partial<ApiKey>, userId: number): Promise<[any, ApiKey | null]> {
     try {
+      const limit = Number((details as any).credits_monthly_limit_usd ?? (details as any).credits_monthly_limit ?? 100);
       const created = await ApiKey.create({
         provider: details.provider,
         model_name: details.model_name || null,
@@ -21,6 +22,10 @@ export class ApiKeyService {
         usage_count: 0,
         last_used_at: null,
         created_by: userId,
+        credits_monthly_limit_usd: limit,
+        credits_used_usd_month: 0,
+        credits_remaining_usd_month: limit,
+        credits_month_start: new Date(),
       } as any);
       return [null, created];
     } catch (error) {
@@ -47,6 +52,10 @@ export class ApiKeyService {
         created_by: k.created_by,
         createdAt: k.createdAt,
         updatedAt: k.updatedAt,
+        credits_monthly_limit_usd: (k as any).credits_monthly_limit_usd,
+        credits_used_usd_month: (k as any).credits_used_usd_month,
+        credits_remaining_usd_month: (k as any).credits_remaining_usd_month,
+        credits_month_start: (k as any).credits_month_start,
       }));
       return [null, masked];
     } catch (error) {
@@ -74,6 +83,10 @@ export class ApiKeyService {
         created_by: key.created_by,
         createdAt: key.createdAt,
         updatedAt: key.updatedAt,
+        credits_monthly_limit_usd: (key as any).credits_monthly_limit_usd,
+        credits_used_usd_month: (key as any).credits_used_usd_month,
+        credits_remaining_usd_month: (key as any).credits_remaining_usd_month,
+        credits_month_start: (key as any).credits_month_start,
       }];
     } catch (error) {
       logger.error('Error fetching API key', error);
@@ -93,8 +106,30 @@ export class ApiKeyService {
       if (details.status !== undefined) key.status = details.status;
       if (details.usage_limit !== undefined) key.usage_limit = details.usage_limit;
 
+      // Update monthly credit limit and optionally reset window
+      const hasLimit = (details as any).credits_monthly_limit_usd !== undefined || (details as any).credits_monthly_limit !== undefined;
+      if (hasLimit) {
+        const newLimit = Number((details as any).credits_monthly_limit_usd ?? (details as any).credits_monthly_limit);
+        (key as any).credits_monthly_limit_usd = newLimit;
+        // If explicit remaining provided, honor it; else adjust remaining to new_limit - used (not below 0)
+        const used = Number((key as any).credits_used_usd_month || 0);
+        const providedRemaining = (details as any).credits_remaining_usd_month;
+        if (providedRemaining !== undefined) {
+          (key as any).credits_remaining_usd_month = Number(providedRemaining);
+        } else {
+          (key as any).credits_remaining_usd_month = Math.max(0, Number(newLimit - used));
+        }
+      }
+
+      if ((details as any).reset_month === true) {
+        const limit = Number((key as any).credits_monthly_limit_usd || 0);
+        (key as any).credits_month_start = new Date();
+        (key as any).credits_used_usd_month = 0;
+        (key as any).credits_remaining_usd_month = limit;
+      }
+
       await key.save();
-      return [null, { id: key.id, provider: key.provider, model_name: key.model_name, api_key: key.api_key, status: key.status, usage_limit: key.usage_limit, usage_count: key.usage_count, last_used_at: key.last_used_at, created_by: key.created_by }];
+      return [null, { id: key.id, provider: key.provider, model_name: key.model_name, api_key: key.api_key, status: key.status, usage_limit: key.usage_limit, usage_count: key.usage_count, last_used_at: key.last_used_at, created_by: key.created_by, credits_monthly_limit_usd: (key as any).credits_monthly_limit_usd, credits_used_usd_month: (key as any).credits_used_usd_month, credits_remaining_usd_month: (key as any).credits_remaining_usd_month, credits_month_start: (key as any).credits_month_start }];
     } catch (error) {
       logger.error('Error updating API key', error);
       return [error, null];

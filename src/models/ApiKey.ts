@@ -13,6 +13,10 @@ interface ApiKeyAttributes {
   created_by: number;
   createdAt?: Date;
   updatedAt?: Date;
+  credits_monthly_limit_usd?: number | null;
+  credits_used_usd_month?: number;
+  credits_remaining_usd_month?: number;
+  credits_month_start?: Date | null;
 }
 
 class ApiKey extends Model<ApiKeyAttributes> implements ApiKeyAttributes {
@@ -27,6 +31,10 @@ class ApiKey extends Model<ApiKeyAttributes> implements ApiKeyAttributes {
   public created_by!: number;
   public readonly createdAt?: Date;
   public readonly updatedAt?: Date;
+  public credits_monthly_limit_usd!: number | null;
+  public credits_used_usd_month!: number;
+  public credits_remaining_usd_month!: number;
+  public credits_month_start!: Date | null;
 }
 
 ApiKey.init({
@@ -43,6 +51,10 @@ ApiKey.init({
   usage_count: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
   last_used_at: { type: DataTypes.DATE, allowNull: true },
   created_by: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
+  credits_monthly_limit_usd: { type: DataTypes.DECIMAL(10, 2), allowNull: true, defaultValue: 100.0 },
+  credits_used_usd_month: { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0.0 },
+  credits_remaining_usd_month: { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 100.0 },
+  credits_month_start: { type: DataTypes.DATE, allowNull: true },
   createdAt: {
     allowNull: false,
     type: DataTypes.DATE,

@@ -5,6 +5,7 @@ import { Prompt } from '../models/Prompt';
 import { ApiKey } from '../models/ApiKey';
 import { User } from '../models/User';
 import logger from '../utils/logger';
+import { computeCostUSD } from '../utils/pricing';
 import axios from 'axios';
 import sanitizeHtml from 'sanitize-html';
 import FormData from 'form-data';
@@ -109,13 +110,14 @@ class ArticleGenerationWorker {
             }
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 40);
 
-            const { articleHtml, imageSummary } = await this.generateArticleWithPDF(
+            const { articleHtml, imageSummary, usage: genUsage } = await this.generateArticleWithPDF(
                 finalPrompt,
                 pdfBuffer,
                 apiKey,
                 generationJob.provider,
                 generationJob.model_name
             );
+            // Track usage from generation
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 75);
 
             const sanitizedHtml = this.sanitizeHtml(articleHtml);
@@ -183,15 +185,23 @@ class ArticleGenerationWorker {
             }
 
             let hindiArticle: Article | null = null;
+            let totalPromptTokens = genUsage?.promptTokens || 0;
+            let totalCompletionTokens = genUsage?.completionTokens || 0;
+
             if (generationJob.generate_hindi_article) {
                 await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 92);
 
-                const hindiHtml = await this.translateArticleToHindi(
+                const { html: hindiHtml, usage: hiUsage } = await this.translateArticleToHindi(
                     sanitizedHtml,
                     apiKey,
                     generationJob.provider,
                     generationJob.model_name
                 );
+
+                if (hiUsage) {
+                    totalPromptTokens += hiUsage.promptTokens || 0;
+                    totalCompletionTokens += hiUsage.completionTokens || 0;
+                }
 
                 const sanitizedHindiHtml = this.sanitizeHtml(hindiHtml);
                 const hindiTitle = this.extractTitle(sanitizedHindiHtml) || `${title} (Hindi)`;
@@ -240,6 +250,17 @@ class ArticleGenerationWorker {
 
             await this.updateApiKeyUsage(apiKey);
 
+            // After successful content generation, estimate and deduct credit usage against API key (global)
+            try {
+                const modelName = generationJob.model_name || 'gpt-4o-mini';
+                const costUsd = computeCostUSD(modelName, totalPromptTokens, totalCompletionTokens);
+                if (costUsd > 0) {
+                    await this.deductApiKeyCredits(apiKey, costUsd);
+                }
+            } catch (e) {
+                logger.warn('Failed to deduct API key credits (usage compute error)', e);
+            }
+
             generationJob.status = JobStatus.COMPLETED;
             generationJob.progress = 100;
             generationJob.result_article_id = article.id;
@@ -280,6 +301,36 @@ class ArticleGenerationWorker {
             this.cleanupTempFile(generatedImagePath, 'generated image');
 
             throw error;
+        }
+    }
+
+    private async deductApiKeyCredits(apiKey: ApiKey, costUsd: number): Promise<void> {
+        const now = new Date();
+        const monthStart = apiKey.credits_month_start ? new Date(apiKey.credits_month_start as any) : null;
+        const needsReset = !monthStart || monthStart.getMonth() !== now.getMonth() || monthStart.getFullYear() !== now.getFullYear();
+
+        if (needsReset) {
+            const limit = Number(apiKey.credits_monthly_limit_usd || 100);
+            apiKey.credits_month_start = now as any;
+            apiKey.credits_used_usd_month = 0 as any;
+            apiKey.credits_remaining_usd_month = limit as any;
+        }
+
+        const used = Number(apiKey.credits_used_usd_month || 0);
+        const remaining = Number(apiKey.credits_remaining_usd_month || 0);
+        const newUsed = Number((used + costUsd).toFixed(4));
+        const newRemaining = Number((remaining - costUsd).toFixed(4));
+
+        apiKey.credits_used_usd_month = Math.max(0, newUsed) as any;
+        apiKey.credits_remaining_usd_month = Math.max(0, newRemaining) as any;
+
+        await apiKey.save();
+
+        const limit = Number(apiKey.credits_monthly_limit_usd || 100);
+        const threshold = limit * 0.2;
+        if (Number(apiKey.credits_remaining_usd_month) <= threshold) {
+            logger.info(`Global API key low credits warning: remaining $${apiKey.credits_remaining_usd_month} (<= 20% of $${limit})`);
+            // Optionally: enqueue a notification job or emit an event
         }
     }
 
@@ -449,7 +500,7 @@ class ArticleGenerationWorker {
         fileId: string,
         apiKey: string,
         model: string
-    ): Promise<{ articleHtml: string; imageSummary: string }> {
+    ): Promise<{ articleHtml: string; imageSummary: string; usage?: { promptTokens: number; completionTokens: number } }> {
 
         const systemText = `
             You are an expert legal content writer and case analyst.
@@ -522,7 +573,11 @@ class ArticleGenerationWorker {
             logger.warn("OpenAI response missing <image_summary> tag. Falling back to article content for image context.");
         }
 
-        return { articleHtml, imageSummary };
+        const usageRaw = res.data?.usage || {};
+        const promptTokens = usageRaw.prompt_tokens ?? usageRaw.input_tokens ?? 0;
+        const completionTokens = usageRaw.completion_tokens ?? usageRaw.output_tokens ?? 0;
+
+        return { articleHtml, imageSummary, usage: { promptTokens, completionTokens } };
     }
 
     private async uploadPdfToOpenAI(
@@ -553,7 +608,7 @@ class ArticleGenerationWorker {
         apiKey: ApiKey,
         provider: string,
         modelName?: string | null
-    ): Promise<{ articleHtml: string; imageSummary: string }> {
+    ): Promise<{ articleHtml: string; imageSummary: string; usage?: { promptTokens: number; completionTokens: number } }> {
 
         if (provider !== "openai") {
             throw new Error("Only OpenAI provider supported for PDF");
@@ -572,7 +627,7 @@ class ArticleGenerationWorker {
         apiKey: ApiKey,
         provider: string,
         modelName?: string | null
-    ): Promise<string> {
+    ): Promise<{ html: string; usage?: { promptTokens: number; completionTokens: number } }> {
         if (!htmlContent?.trim()) {
             throw new Error('Cannot translate empty article content');
         }
@@ -627,7 +682,11 @@ Do not summarize, omit, or add any content. Return ONLY the translated HTML, wit
             throw new Error('Failed to translate article to Hindi');
         }
 
-        return translatedHtml;
+        const usageRaw = response.data?.usage || {};
+        const promptTokens = usageRaw.prompt_tokens ?? usageRaw.input_tokens ?? 0;
+        const completionTokens = usageRaw.completion_tokens ?? usageRaw.output_tokens ?? 0;
+
+        return { html: translatedHtml, usage: { promptTokens, completionTokens } };
     }
 
     private async generateFeaturedImage(
