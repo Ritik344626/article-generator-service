@@ -10,7 +10,7 @@ import axios from 'axios';
 import sanitizeHtml from 'sanitize-html';
 import FormData from 'form-data';
 import path from 'path';
-import { promises as fsPromises, createReadStream } from 'fs';
+import { createReadStream } from 'fs';
 import CloudflareR2Service from '../services/storage.service';
 import { GoogleGenAI } from "@google/genai";
 
@@ -45,7 +45,7 @@ interface WordPressPostPayload {
 class ArticleGenerationWorker {
     private worker: Worker;
     private storageService: CloudflareR2Service;
-    private ai: GoogleGenAI;
+    private ai: GoogleGenAI | null;
     private wpBaseUrl: string;
 
     constructor() {
@@ -60,7 +60,13 @@ class ArticleGenerationWorker {
             },
         });
 
-        this.ai = new GoogleGenAI({});
+        const geminiApiKey = process.env.GEMINI_API_KEY;
+        if (geminiApiKey) {
+            this.ai = new GoogleGenAI({ apiKey: geminiApiKey });
+        } else {
+            this.ai = null;
+            logger.warn('GEMINI_API_KEY not configured; Gemini enhancements will be skipped');
+        }
 
         this.worker.on('completed', (job) => {
             logger.info(`Job ${job.id} completed successfully`);
@@ -82,8 +88,8 @@ class ArticleGenerationWorker {
         logger.info(`Processing job ${jobId}`);
 
         let tempFilePath: string | null = null;
-        let generatedImagePath: string | null = null;
         let generatedImageUrl: string | null = null;
+        let generatedImageMediaId: number | null = null;
         let articlePdfUrl: string | null = null;
 
         try {
@@ -104,7 +110,7 @@ class ArticleGenerationWorker {
             await generationJob.save();
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 30);
 
-            const apiKey = await this.selectApiKey(generationJob);
+            const apiKey = await this.selectApiKey(generationJob.provider);
             if (!apiKey) {
                 throw new Error(`No active API key found for provider: ${generationJob.provider}`);
             }
@@ -120,7 +126,19 @@ class ArticleGenerationWorker {
             // Track usage from generation
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 75);
 
-            const sanitizedHtml = this.sanitizeHtml(articleHtml);
+            let workingArticleHtml = articleHtml;
+            if (generationJob.ai_enhancement) {
+                await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 78);
+                workingArticleHtml = await this.enhanceArticleWithGemini(articleHtml, {
+                    basePrompt: finalPrompt,
+                    customPrompt: generationJob.custom_prompt,
+                    imageSummary,
+                    pdfUrl: generationJob.pdf_url,
+                    jobId,
+                });
+            }
+
+            const sanitizedHtml = this.sanitizeHtml(workingArticleHtml);
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 80);
 
             const title = this.extractTitle(sanitizedHtml) || 'Generated Article';
@@ -137,15 +155,13 @@ class ArticleGenerationWorker {
                 title,
                 imageContextForPrompt,
                 apiKey,
-                generationJob.provider,
                 jobId,
+                generationJob,
             );
 
-            if (imageResult) {
-                generatedImagePath = imageResult.absolutePath;
-                generatedImageUrl = imageResult.fileUrl;
-                await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 85);
-            }
+            generatedImageUrl = imageResult.sourceUrl;
+            generatedImageMediaId = imageResult.mediaId;
+            await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 85);
 
             const resolvedPdfUrl = await this.resolveArticlePdfUrl(articlePdfUrl, tempFilePath, generationJob);
 
@@ -156,6 +172,9 @@ class ArticleGenerationWorker {
             );
             const wpTags = Array.isArray(generationJob.wp_config?.tags) ? generationJob.wp_config?.tags : [];
             const wpCategories = Array.isArray(generationJob.wp_config?.categories) ? generationJob.wp_config?.categories : [];
+            const featuredMediaId = generatedImageMediaId
+                ?? generationJob.wp_config?.featured_media_wp_id
+                ?? null;
 
             const article = await Article.create({
                 title,
@@ -167,7 +186,7 @@ class ArticleGenerationWorker {
                 ai_model: `${generationJob.provider}/${generationJob.model_name || 'default'}`,
                 ai_prompt: finalPrompt.substring(0, 5000),
                 author_wp_id: generationJob.wp_config?.author_wp_id || null,
-                featured_media_wp_id: generationJob.wp_config?.featured_media_wp_id || null,
+                featured_media_wp_id: featuredMediaId,
                 meta: baseMeta,
                 tags: wpTags,
                 categories: wpCategories,
@@ -177,18 +196,20 @@ class ArticleGenerationWorker {
 
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 90);
 
-            if (generationJob.publish_to_wp) {
-                await this.publishToWordPress(article, generationJob, {
-                    imagePath: generatedImagePath,
-                    imageUrl: generatedImageUrl,
-                });
-            }
+            // if (generationJob.publish_to_wp) {
+            //     await this.publishToWordPress(article, generationJob, {
+            //         imagePath: null,
+            //         imageUrl: generatedImageUrl,
+            //         existingMediaId: generatedImageMediaId,
+            //     });
+            // }
 
             let hindiArticle: Article | null = null;
             let totalPromptTokens = genUsage?.promptTokens || 0;
             let totalCompletionTokens = genUsage?.completionTokens || 0;
 
             if (generationJob.generate_hindi_article) {
+                logger.info(`Generating Hindi translation for article ${article.id} (job ${jobId})`);
                 await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 92);
 
                 const { html: hindiHtml, usage: hiUsage } = await this.translateArticleToHindi(
@@ -232,13 +253,13 @@ class ArticleGenerationWorker {
                     translation_of_article_id: article.id,
                 } as any);
 
-                if (generationJob.publish_to_wp) {
-                    await this.publishToWordPress(hindiArticle, generationJob, {
-                        imagePath: generatedImagePath,
-                        imageUrl: generatedImageUrl,
-                        existingMediaId: article.featured_media_wp_id || generationJob.wp_config?.featured_media_wp_id || null,
-                    });
-                }
+                // if (generationJob.publish_to_wp) {
+                //     await this.publishToWordPress(hindiArticle, generationJob, {
+                //         imagePath: null,
+                //         imageUrl: generatedImageUrl,
+                //         existingMediaId: generatedImageMediaId || article.featured_media_wp_id || generationJob.wp_config?.featured_media_wp_id || null,
+                //     });
+                // }
 
                 await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 95);
 
@@ -297,8 +318,6 @@ class ArticleGenerationWorker {
             } else {
                 logger.info(`Attempt ${currentAttempt}/${maxAttempts} failed, keeping temp file for retry`);
             }
-
-            this.cleanupTempFile(generatedImagePath, 'generated image');
 
             throw error;
         }
@@ -444,7 +463,6 @@ class ArticleGenerationWorker {
             }
         }
 
-        // Default prompt if none found
         if (!basePrompt) {
             if (job.ai_enhancement) {
                 basePrompt = `You are an expert content writer. Analyze the PDF document and convert it into a well-structured, engaging HTML article. 
@@ -458,7 +476,6 @@ class ArticleGenerationWorker {
             }
         }
 
-        // Add custom prompt if provided
         if (job.custom_prompt) {
             basePrompt += `\n\nAdditional Instructions: ${job.custom_prompt}`;
         }
@@ -466,15 +483,14 @@ class ArticleGenerationWorker {
         return basePrompt;
     }
 
-    private async selectApiKey(job: GenerationJob): Promise<ApiKey | null> {
+    private async selectApiKey(provider : string): Promise<ApiKey | null> {
         const where: any = {
-            provider: job.provider,
+            provider: provider,
             status: 'active',
         };
 
-        // Try user's keys first
         const userKey = await ApiKey.findOne({
-            where: { ...where, created_by: job.user_id },
+            where: { ...where },
             order: [['usage_count', 'ASC']],
         });
 
@@ -482,7 +498,6 @@ class ArticleGenerationWorker {
             return userKey;
         }
 
-        // Fallback to any active key
         const systemKey = await ApiKey.findOne({
             where,
             order: [['usage_count', 'ASC']],
@@ -557,7 +572,6 @@ class ArticleGenerationWorker {
             throw new Error("Failed to extract OpenAI response text");
         }
 
-        // Extract <article_html> and <image_summary>
         const articleMatch = raw.match(/<article_html>([\s\S]*?)<\/article_html>/i);
         const summaryMatch = raw.match(/<image_summary>([\s\S]*?)<\/image_summary>/i);
 
@@ -565,7 +579,6 @@ class ArticleGenerationWorker {
         const imageSummary = summaryMatch ? summaryMatch[1].trim() : "";
 
         if (!articleHtml) {
-            // If AI didn't return article_html, log full raw text for debugging
             logger.warn("OpenAI response missing <article_html> tag. Raw output truncated to 2000 chars:", raw.substring(0, 2000));
         }
 
@@ -620,6 +633,132 @@ class ArticleGenerationWorker {
         logger.info(`PDF uploaded → ${fileId}`);
 
         return await this.callOpenAIWithUploadedPdf(prompt, fileId, apiKey.api_key, model);
+    }
+
+    private getGeminiClient(): GoogleGenAI | null {
+        if (this.ai) {
+            return this.ai;
+        }
+
+        const geminiApiKey = process.env.GEMINI_API_KEY;
+        if (!geminiApiKey) {
+            return null;
+        }
+
+        this.ai = new GoogleGenAI({ apiKey: geminiApiKey });
+        return this.ai;
+    }
+
+    private async enhanceArticleWithGemini(
+        articleHtml: string,
+        context: {
+            basePrompt: string;
+            customPrompt?: string | null;
+            imageSummary?: string | null;
+            pdfUrl?: string | null;
+            jobId: number;
+        }
+    ): Promise<string> {
+        if (!articleHtml?.trim()) {
+            return articleHtml;
+        }
+
+        const geminiClient = this.getGeminiClient();
+        if (!geminiClient) {
+            logger.warn(`Gemini API key missing, skipping enhancement for job ${context.jobId}`);
+            return articleHtml;
+        }
+
+        const model = process.env.GEMINI_ENHANCEMENT_MODEL || 'gemini-2.5-flash';
+        const temperatureEnv = Number(process.env.GEMINI_ENHANCEMENT_TEMPERATURE);
+        const maxTokensEnv = Number(process.env.GEMINI_ENHANCEMENT_MAX_TOKENS);
+        const temperature = Number.isFinite(temperatureEnv) ? temperatureEnv : 0.35;
+        const maxOutputTokens = Number.isFinite(maxTokensEnv) ? maxTokensEnv : 6000;
+
+        const guidance = [
+            'You are a senior legal editor. Polish the HTML article below using the provided context.',
+            'Goals:',
+            '- Preserve every HTML tag and attribute unless restructuring improves clarity.',
+            '- Strengthen readability, coherence, cross-linking sentences, and SEO value.',
+            '- Use only facts present in the provided context; never introduce new facts.',
+            '- Return ONLY the enhanced HTML, no explanations or markdown.'
+        ].join('\n');
+
+        const contextSections: string[] = [];
+        if (context.basePrompt) {
+            contextSections.push(`Original generation instructions:\n${context.basePrompt}`);
+        }
+        if (context.customPrompt) {
+            contextSections.push(`Custom user instructions:\n${context.customPrompt}`);
+        }
+        if (context.imageSummary) {
+            contextSections.push(`Case summary context:\n${context.imageSummary}`);
+        }
+        if (context.pdfUrl) {
+            contextSections.push(`Reference PDF URL: ${context.pdfUrl}`);
+        }
+
+        const payload = [
+            guidance,
+            contextSections.length ? contextSections.join('\n\n') : '',
+            'Original HTML (keep structure while refining wording):',
+            articleHtml,
+        ].filter(Boolean).join('\n\n');
+
+        try {
+            const response = await geminiClient.models.generateContent({
+                model,
+                contents: [
+                    { role: "user", parts: [{ text: payload }] }
+                ],
+                config: {
+                    temperature,
+                    maxOutputTokens,
+                },
+            });
+
+            const enhanced = this.extractTextFromGeminiResponse(response).trim();
+            if (!enhanced) {
+                logger.warn(`Gemini enhancement returned empty output for job ${context.jobId}`);
+                return articleHtml;
+            }
+
+            logger.info(`Gemini enhancement succeeded for job ${context.jobId}`);
+            return enhanced;
+        } catch (error: any) {
+            logger.warn(
+                `Gemini enhancement failed for job ${context.jobId}:`,
+                JSON.stringify(error, Object.getOwnPropertyNames(error), 2)
+            );
+            return articleHtml;
+        }
+    }
+
+    private extractTextFromGeminiResponse(response: any): string {
+        if (!response) {
+            return '';
+        }
+
+        try {
+            if (typeof response.text === 'function') {
+                return response.text();
+            }
+            if (typeof response.text === 'string') {
+                return response.text;
+            }
+        } catch (error) {
+            logger.warn('Failed to read Gemini response via text()', error);
+        }
+
+        const candidates = response?.response?.candidates || response?.candidates;
+        if (Array.isArray(candidates) && candidates.length > 0) {
+            const parts = candidates[0]?.content?.parts;
+            if (Array.isArray(parts)) {
+                return parts.map((part: any) => part?.text || '').join('').trim();
+            }
+        }
+
+        return '';
     }
 
     private async translateArticleToHindi(
@@ -693,109 +832,74 @@ Do not summarize, omit, or add any content. Return ONLY the translated HTML, wit
         title: string,
         html: string,
         apiKey: ApiKey,
-        provider: string,
         jobId: number,
-    ): Promise<{ absolutePath: string; fileUrl: string } | null> {
+        job: GenerationJob,
+    ): Promise<{ mediaId: number; sourceUrl: string }> {
         if (!html?.trim()) {
-            logger.info(`Skipping image generation for job ${jobId} - empty content`);
-            return null;
+            throw new Error('Cannot generate featured image without article content');
         }
 
         const prompt = this.buildImagePrompt(title, html);
         if (!prompt) {
-            return null;
+            throw new Error('Failed to build image prompt for featured image generation');
         }
 
-        switch (provider.toLowerCase()) {
-            case 'openai':
-                return this.callOpenAIImageGeneration(prompt, apiKey, jobId);
-            case 'gemini':
-                return this.generateGeminiImage(prompt, apiKey, jobId);
-            default:
-                logger.info(`Skipping image generation - unsupported provider: ${provider}`);
-                return null;
+        const geminiApiKey = await this.selectApiKey('gemini');
+        const imageBuffer = await this.generateGeminiImage(prompt, geminiApiKey ?? apiKey, jobId);
+
+        if (!imageBuffer) {
+            throw new Error('Gemini image generation returned empty output');
         }
-    }
 
-    // New helper method for the existing OpenAI logic
-    private async callOpenAIImageGeneration(
-        prompt: string,
-        apiKey: ApiKey,
-        jobId: number,
-    ): Promise<{ absolutePath: string; fileUrl: string } | null> {
-        const model = process.env.IMAGE_GENERATION_MODEL || 'dall-e-3';
-        const size = process.env.IMAGE_GENERATION_SIZE || '1024x1024';
-
-        try {
-            const response = await axios.post(
-                'https://api.openai.com/v1/images/generations',
-                {
-                    model,
-                    prompt,
-                    size,
-                },
-                {
-                    headers: {
-                        Authorization: `Bearer ${apiKey.api_key}`,
-                        'Content-Type': 'application/json',
-                    },
-                    timeout: 120000,
-                }
-            );
-
-            const imageUrl = response.data?.data?.[0]?.url;
-            if (!imageUrl) {
-                logger.warn('OpenAI image response missing url payload', response.data);
-                return null;
-            }
-
-            // Reuse existing download and save logic
-            const buffer = await this.downloadImage(imageUrl, jobId);
-            return await this.saveImageBuffer(buffer, jobId);
-        } catch (error: any) {
-            logger.warn('Failed to generate featured image with OpenAI', error?.response?.data || error);
-            return null;
-        }
+        return this.uploadGeneratedImageToWordPress(imageBuffer, job, jobId);
     }
 
     private async generateGeminiImage(
         prompt: string,
         apiKey: ApiKey,
         jobId: number,
-    ): Promise<{ absolutePath: string; fileUrl: string } | null> {
-        
-        // 🛑 Use the dedicated Imagen model for best results and correct API path
-        const aiClient = new GoogleGenAI({ apiKey: apiKey.api_key });
-        const model = process.env.IMAGE_GENERATION_MODEL || "gemini-2.5-flash-image";
-        const aspectRatio = process.env.IMAGE_GENERATION_SIZE || '1:1'; 
-        
-        // The SDK handles endpoint, versioning, and JSON payload correctly.
+    ): Promise<Buffer | null> {
+
+        const url =
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent";
+
         try {
-            const response = await aiClient.models.generateImages({
-                model: model,
-                prompt: prompt,
-                config: { 
-                    numberOfImages: 1,
-                    aspectRatio: aspectRatio, 
-                    outputMimeType: "image/png",
-                },
+            const response = await fetch(`${url}?key=${apiKey.api_key}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: prompt }] }]
+                }),
             });
 
-            // The SDK response structure for generateImages is simple
-            const base64Image = response.generatedImages?.[0]?.image?.imageBytes;
+            const data = await response.json();
 
-            if (!base64Image) {
-                logger.warn('Gemini SDK image response missing Base64 payload', response);
+            const parts = data?.candidates?.[0]?.content?.parts;
+            if (!Array.isArray(parts)) {
+                logger.warn("Missing parts array in response", data);
                 return null;
             }
 
-            // Decode Base64 and save (reuse your existing logic)
-            const buffer = Buffer.from(base64Image, 'base64');
-            return await this.saveImageBuffer(buffer, jobId);
+            let base64: string | null = null;
 
-        } catch (error: any) {
-            // Error handling will catch SDK-specific errors as well
-            logger.warn('Failed to generate featured image with Gemini SDK', error);
+            for (const part of parts) {
+                if (part.inlineData?.data) {
+                    base64 = part.inlineData.data;
+                    break;
+                }
+            }
+
+            if (!base64) {
+                logger.warn("No Base64 inlineData.image found", data);
+                return null;
+            }
+
+            const cleanBase64 = base64.replace(/\s+/g, "").trim();
+
+            return Buffer.from(cleanBase64, "base64");
+
+        } catch (error) {
+            logger.warn("Failed to generate image", error);
             return null;
         }
     }
@@ -823,41 +927,59 @@ Do not summarize, omit, or add any content. Return ONLY the translated HTML, wit
             `.trim();
     }
 
+    private async uploadGeneratedImageToWordPress(
+        buffer: Buffer,
+        job: GenerationJob,
+        jobId: number,
+    ): Promise<{ mediaId: number; sourceUrl: string }> {
+        const wpUser = await User.findByPk(job.user_id);
+        if (!wpUser) {
+            throw new Error(`Unable to upload featured image: user ${job.user_id} not found`);
+        }
+
+        if (!wpUser.samvida_token) {
+            throw new Error(`Unable to upload featured image: user ${job.user_id} missing Samvida token`);
+        }
+
+        const maxAttempts = Number(process.env.WP_IMAGE_UPLOAD_MAX_ATTEMPTS || 3);
+        const retryDelayMs = Number(process.env.WP_IMAGE_UPLOAD_RETRY_DELAY_MS || 3000);
+        const fileName = `article-${jobId}-${Date.now()}.png`;
+        let lastError: any = null;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                const uploadResult = await this.uploadImageToWordPress(
+                    wpUser.samvida_token,
+                    null,
+                    null,
+                    buffer,
+                    fileName,
+                );
+
+                logger.info(`Uploaded featured image to WordPress media ${uploadResult.mediaId} for job ${job.id} (attempt ${attempt})`);
+                return uploadResult;
+            } catch (error: any) {
+                lastError = error;
+                logger.warn(`Attempt ${attempt}/${maxAttempts} to upload featured image for job ${job.id} failed`, error?.response?.data || error?.message || error);
+                if (attempt < maxAttempts) {
+                    await this.delay(retryDelayMs * attempt);
+                }
+            }
+        }
+
+        throw new Error(`Failed to upload featured image to WordPress after ${maxAttempts} attempts: ${lastError?.message || 'Unknown error'}`);
+    }
+
 
     private stripHtml(input: string): string {
         return input.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
     }
+    private async delay(ms: number): Promise<void> {
+        if (ms <= 0) {
+            return;
+        }
 
-    private async downloadImage(imageUrl: string, jobId: number): Promise<Buffer> {
-        const response = await axios.get(imageUrl, {
-            responseType: 'arraybuffer',
-            timeout: 120000,
-        });
-
-        logger.info(`Downloaded generated image for job ${jobId}`);
-        return Buffer.from(response.data);
-    }
-
-    private async saveImageBuffer(buffer: Buffer, jobId: number): Promise<{ absolutePath: string; fileUrl: string }> {
-        const uploadsRoot = process.env.UPLOAD_DIR
-            ? path.resolve(process.env.UPLOAD_DIR)
-            : path.resolve(process.cwd(), 'uploads');
-        const outputDir = process.env.GENERATED_IMAGE_DIR
-            ? path.resolve(process.env.GENERATED_IMAGE_DIR)
-            : path.join(uploadsRoot, 'images');
-
-        await fsPromises.mkdir(outputDir, { recursive: true });
-
-        const fileName = `article-${jobId}-${Date.now()}.png`;
-        const absolutePath = path.join(outputDir, fileName);
-        await fsPromises.writeFile(absolutePath, buffer);
-
-        const publicBase = process.env.GENERATED_IMAGE_PUBLIC_URL?.replace(/\/+$/, '');
-        const fileUrl = publicBase ? `${publicBase}/${fileName}` : `file://${absolutePath}`;
-
-        logger.info(`Featured image stored at ${absolutePath}`);
-
-        return { absolutePath, fileUrl };
+        await new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     private async resolveArticlePdfUrl(
@@ -1031,16 +1153,21 @@ Do not summarize, omit, or add any content. Return ONLY the translated HTML, wit
     private async uploadImageToWordPress(
         token: string,
         imagePath?: string | null,
-        fallbackUrl?: string | null
+        fallbackUrl?: string | null,
+        buffer?: Buffer | null,
+        explicitFileName?: string,
     ): Promise<{ mediaId: number; sourceUrl: string }> {
-        if (!imagePath && !fallbackUrl) {
+        if (!imagePath && !fallbackUrl && !buffer) {
             throw new Error('No image available to upload to WordPress');
         }
 
         const formData = new FormData();
-        const fileName = imagePath ? path.basename(imagePath) : `article-${Date.now()}.png`;
+        const fileName = explicitFileName
+            || (imagePath ? path.basename(imagePath) : `article-${Date.now()}.png`);
 
-        if (imagePath) {
+        if (buffer) {
+            formData.append('file', buffer, { filename: fileName });
+        } else if (imagePath) {
             formData.append('file', createReadStream(imagePath), { filename: fileName });
         } else if (fallbackUrl) {
             const response = await axios.get(fallbackUrl, {

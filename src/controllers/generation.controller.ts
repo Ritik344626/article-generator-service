@@ -39,6 +39,7 @@ export class GenerationController {
         model_name: req.body.model_name,
         publish_to_wp: req.body.publish_to_wp === 'true' || req.body.publish_to_wp === true,
         wp_config: req.body.wp_config ? JSON.parse(req.body.wp_config) : undefined,
+        generate_hindi_article: req.body.generate_hindi_article === 'true' || req.body.generate_hindi_article === true,
       };
 
       const [error, job] = await this.generationService.createJob(input, authUser.id);

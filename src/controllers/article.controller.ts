@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { ArticleFeedService } from '../services/articleFeed.service';
 import { createResponse } from '../utils/utils';
+import { User } from '../models/User';
 
 export class ArticleController {
     private feedService: ArticleFeedService;
@@ -11,6 +12,8 @@ export class ArticleController {
 
     async list(req: Request, res: Response) {
         try {
+            const authUser = req.user as User;
+
             const query = {
                 page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
                 limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
@@ -26,7 +29,7 @@ export class ArticleController {
                     : undefined,
             };
 
-            const payload = await this.feedService.listFeed(query);
+            const payload = await this.feedService.listFeed(query, authUser);
             return createResponse(res, { status: true, payload });
         } catch (error: any) {
             return createResponse(res, {

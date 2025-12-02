@@ -2,6 +2,7 @@ import { QueryTypes } from 'sequelize';
 import { sequelize } from '../config/database';
 import { JobStatus } from '../models/GenerationJob';
 import { ApiKey } from '../models/ApiKey';
+import { User } from '../models/User';
 
 export interface ArticleFeedQuery {
     page?: number;
@@ -27,6 +28,11 @@ interface ArticleFeedRow {
     pdf_url: string | null;
     provider: string | null;
     prompt_category: string | null;
+    user_id: number | null;
+    user_name: string | null;
+    user_email: string | null;
+    user_display_name: string | null;
+    user_roles: any;
 }
 
 export class ArticleFeedService {
@@ -38,7 +44,7 @@ export class ArticleFeedService {
         progress: 'progress',
     };
 
-    async listFeed(query: ArticleFeedQuery) {
+    async listFeed(query: ArticleFeedQuery, currentUser?: User) {
         const page = Math.max(Number(query.page) || 1, 1);
         const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
         const offset = (page - 1) * limit;
@@ -73,8 +79,30 @@ export class ArticleFeedService {
             throw new Error('Invalid type filter. Expected "article" or "job".');
         }
 
+        const isAdmin = this.isAdminUser(currentUser);
+        const currentUserId = currentUser?.id;
+
+        if (!isAdmin) {
+            if (!currentUserId) {
+                throw new Error('Authenticated user context required to filter feed results');
+            }
+
+            if (includeArticles) {
+                articleFilters.push('ua.id = :currentUserId');
+            }
+
+            if (includeJobs) {
+                jobFilters.push('gj.user_id = :currentUserId');
+            }
+
+            baseReplacements.currentUserId = currentUserId;
+        }
+
         const articleWhereClause = articleFilters.length ? `WHERE ${articleFilters.join(' AND ')}` : '';
         const jobWhereClause = jobFilters.length ? `WHERE ${jobFilters.join(' AND ')}` : '';
+
+        const processingTitle = process.env.JOB_PROCESSING_PLACEHOLDER_TITLE || 'Processing Article';
+        baseReplacements.processingTitle = processingTitle;
 
         const segments: string[] = [];
 
@@ -92,9 +120,16 @@ export class ArticleFeedService {
                     a.featured_image_url AS featured_image_url,
                     a.pdf_url AS pdf_url,
                     NULL AS provider,
-                    p.category AS prompt_category
+                    p.category AS prompt_category,
+                    ua.id AS user_id,
+                    ua.name AS user_name,
+                    ua.email AS user_email,
+                    ua.user_display_name AS user_display_name,
+                    ua.roles AS user_roles
                 FROM articles a
                 LEFT JOIN prompts p ON a.prompt_template_id = p.id
+                LEFT JOIN generation_jobs agj ON agj.result_article_id = COALESCE(a.translation_of_article_id, a.id)
+                LEFT JOIN users ua ON ua.id = agj.user_id
                 ${articleWhereClause}
             `);
         }
@@ -103,7 +138,7 @@ export class ArticleFeedService {
             segments.push(`
                 SELECT
                     gj.id AS record_id,
-                    COALESCE(gj.result_preview, gj.custom_prompt, gj.prompt_category, CONCAT('Job ', gj.uuid)) AS title,
+                    COALESCE(gj.result_preview, gj.custom_prompt, gj.prompt_category, :processingTitle) AS title,
                     gj.status AS status,
                     'job' AS record_type,
                     gj.uuid AS uuid,
@@ -113,8 +148,14 @@ export class ArticleFeedService {
                     NULL AS featured_image_url,
                     gj.pdf_url AS pdf_url,
                     gj.provider AS provider,
-                    gj.prompt_category AS prompt_category
+                    gj.prompt_category AS prompt_category,
+                    uj.id AS user_id,
+                    uj.name AS user_name,
+                    uj.email AS user_email,
+                    uj.user_display_name AS user_display_name,
+                    uj.roles AS user_roles
                 FROM generation_jobs gj
+                LEFT JOIN users uj ON uj.id = gj.user_id
                 ${jobWhereClause}
             `);
         }
@@ -165,8 +206,56 @@ export class ArticleFeedService {
                 pdf_url: row.pdf_url,
                 provider: row.provider,
                 prompt_category: row.prompt_category,
+                createdBy: this.buildCreatedBy(row),
             })),
         };
+    }
+
+    private buildCreatedBy(row: ArticleFeedRow) {
+        if (!row.user_id) {
+            return null;
+        }
+
+        return {
+            id: row.user_id,
+            name: row.user_name,
+            email: row.user_email,
+            displayName: row.user_display_name,
+            roles: this.deserializeRoles(row.user_roles) || [],
+        };
+    }
+
+    private deserializeRoles(value: any): string[] | null {
+        if (!value) {
+            return null;
+        }
+
+        if (Array.isArray(value)) {
+            return value.filter(Boolean).map((role) => String(role));
+        }
+
+        if (typeof value === 'string') {
+            try {
+                const parsed = JSON.parse(value);
+                if (Array.isArray(parsed)) {
+                    return parsed.filter(Boolean).map((role) => String(role));
+                }
+            } catch {
+                return [value];
+            }
+        }
+
+        return null;
+    }
+
+    private isAdminUser(user?: User): boolean {
+        if (!user?.roles?.length) {
+            return false;
+        }
+
+        return user.roles.some((role) =>
+            typeof role === 'string' && ['administrator', 'admin'].includes(role.toLowerCase())
+        );
     }
 
     /**
