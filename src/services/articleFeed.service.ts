@@ -101,7 +101,7 @@ export class ArticleFeedService {
         const articleWhereClause = articleFilters.length ? `WHERE ${articleFilters.join(' AND ')}` : '';
         const jobWhereClause = jobFilters.length ? `WHERE ${jobFilters.join(' AND ')}` : '';
 
-        const processingTitle = process.env.JOB_PROCESSING_PLACEHOLDER_TITLE || 'Processing Article';
+        const processingTitle = process.env.JOB_PROCESSING_PLACEHOLDER_TITLE || 'Processing Title...';
         baseReplacements.processingTitle = processingTitle;
 
         const segments: string[] = [];
@@ -138,7 +138,7 @@ export class ArticleFeedService {
             segments.push(`
                 SELECT
                     gj.id AS record_id,
-                    COALESCE(gj.result_preview, gj.custom_prompt, gj.prompt_category, :processingTitle) AS title,
+                    COALESCE(gj.result_preview, :processingTitle) AS title,
                     gj.status AS status,
                     'job' AS record_type,
                     gj.uuid AS uuid,

@@ -240,6 +240,7 @@ class ArticleGenerationWorker {
                     title: hindiTitle,
                     content: sanitizedHindiHtml,
                     status: 'draft',
+                    prompt_template_id: generationJob.prompt_template_id || null,
                     pdf_url: resolvedPdfUrl || generationJob.pdf_url,
                     source_text: `Hindi translation of article ${article.id}`,
                     ai_model: `${generationJob.provider}/${generationJob.model_name || 'default'}`,
