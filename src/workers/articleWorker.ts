@@ -449,7 +449,6 @@ class ArticleGenerationWorker {
     private async buildPromptForPdf(job: GenerationJob): Promise<string> {
         let basePrompt = '';
 
-        // Load template if specified
         if (job.prompt_template_id) {
             const template = await Prompt.findByPk(job.prompt_template_id);
             if (template) {
@@ -464,16 +463,21 @@ class ArticleGenerationWorker {
             }
         }
 
+        console.log('Base prompt from template/category:', basePrompt);
+        console.log('Job AI enhancement flag:', job);
+
         if (!basePrompt) {
             if (job.ai_enhancement) {
                 basePrompt = `You are an expert content writer. Analyze the PDF document and convert it into a well-structured, engaging HTML article. 
                         Add proper headings (<h1>, <h2>, <h3>), paragraphs (<p>), lists (<ul>, <ol>), and formatting. 
                         Make the content SEO-friendly and reader-friendly. Add insights and improve clarity where needed.
-                        Maintain the document's original meaning while making it comprehensive and professional.`;
+                        Maintain the document's original meaning while making it comprehensive and professional.
+                        Do NOT insert empty paragraphs, redundant <br> tags, or consecutive blank lines; keep spacing tight and purposeful.`;
             } else {
                 basePrompt = `Convert the PDF document into a clean HTML article. 
                         Preserve the original content as much as possible. Add proper HTML structure with headings (<h1>, <h2>, <h3>), 
-                        paragraphs (<p>), and lists (<ul>, <ol>). Do not add new content or modify the meaning.`;
+                        paragraphs (<p>), and lists (<ul>, <ol>). Do not add new content or modify the meaning.
+                        Avoid extra blank lines, empty tags, or stray \n characters—only include intentional spacing.`;
             }
         }
 
