@@ -253,6 +253,8 @@ export class ArticleFeedService {
             return false;
         }
 
+        console.log('User roles:', user.roles);
+
         return user.roles.some((role) =>
             typeof role === 'string' && ['administrator', 'admin'].includes(role.toLowerCase())
         );
