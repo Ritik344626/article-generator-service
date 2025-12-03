@@ -846,7 +846,7 @@ Do not summarize, omit, or add any content. Return ONLY the translated HTML, wit
         }
 
         const geminiApiKey = await this.selectApiKey('gemini');
-        const imageBuffer = await this.generateGeminiImage(prompt, geminiApiKey ?? apiKey, jobId);
+        const imageBuffer = await this.generateGeminiImage(prompt, geminiApiKey ?? apiKey);
 
         if (!imageBuffer) {
             throw new Error('Gemini image generation returned empty output');
@@ -858,7 +858,6 @@ Do not summarize, omit, or add any content. Return ONLY the translated HTML, wit
     private async generateGeminiImage(
         prompt: string,
         apiKey: ApiKey,
-        jobId: number,
     ): Promise<Buffer | null> {
 
         const url =

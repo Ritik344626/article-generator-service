@@ -101,7 +101,7 @@ export class ArticleFeedService {
         const articleWhereClause = articleFilters.length ? `WHERE ${articleFilters.join(' AND ')}` : '';
         const jobWhereClause = jobFilters.length ? `WHERE ${jobFilters.join(' AND ')}` : '';
 
-        const processingTitle = process.env.JOB_PROCESSING_PLACEHOLDER_TITLE || 'Processing Title...';
+        const processingTitle = process.env.JOB_PROCESSING_PLACEHOLDER_TITLE || 'Processing Article...';
         baseReplacements.processingTitle = processingTitle;
 
         const segments: string[] = [];
