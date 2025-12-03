@@ -7,9 +7,9 @@
  * Run: npm run worker
  */
 
-import ArticleGenerationWorker from '../src/workers/articleWorker';
-import logger from '../src/utils/logger';
-import { connectToDatabase } from '../src/config/database';
+import ArticleGenerationWorker from './workers/articleWorker';
+import logger from './utils/logger';
+import { connectToDatabase } from './config/database';
 
 async function startWorker() {
   try {

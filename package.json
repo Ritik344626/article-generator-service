@@ -8,7 +8,7 @@
     "start": "node dist/server.js",
     "dev": "nodemon src/server.ts",
     "dev:all": "concurrently \"npm run dev\" \"npm run worker:dev\" --names \"API,WORKER\" --prefix-colors \"cyan,magenta\"",
-    "worker": "ts-node bin/worker.ts",
+    "worker": "ts-node src/worker.ts",
     "worker:dev": "nodemon bin/worker.ts",
     "test": "echo \"Error: no test specified\" && exit 1",
     "migrate": "npx sequelize db:migrate --config config/config.js",
