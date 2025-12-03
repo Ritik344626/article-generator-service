@@ -249,14 +249,26 @@ export class ArticleFeedService {
     }
 
     private isAdminUser(user?: User): boolean {
-        if (!user?.roles?.length) {
-            return false;
+        if (!user?.roles) return false;
+
+        let roles = user.roles;
+
+        if (typeof roles === 'string') {
+            try {
+                roles = JSON.parse(roles);
+            } catch (err) {
+                console.log('Failed to parse roles:', roles);
+                return false;
+            }
         }
 
-        console.log('User roles raw:', user.roles, typeof user.roles);
+        console.log("Parsed roles:", roles);
 
-        return user.roles.some((role) =>
-            typeof role === 'string' && ['administrator', 'admin'].includes(role.toLowerCase())
+        if (!Array.isArray(roles)) return false;
+
+        return roles.some((role) =>
+            typeof role === 'string' &&
+            ['administrator', 'admin'].includes(role.toLowerCase())
         );
     }
 
