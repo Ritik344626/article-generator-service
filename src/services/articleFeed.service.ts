@@ -276,18 +276,23 @@ export class ArticleFeedService {
      * Get article statistics for dashboard
      */
     async getArticleStats() {
-        const query = `
+        const articleQuery = `
             SELECT 
                 COUNT(*) as total,
                 SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) as draft,
-                SUM(CASE WHEN status = 'publish' THEN 1 ELSE 0 END) as published,
+                SUM(CASE WHEN status = 'publish' THEN 1 ELSE 0 END) as published
+            FROM articles
+        `;
+        const jobQuery = `
+            SELECT 
                 SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
                 SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
                 SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
-            FROM articles
+            FROM generation_jobs
         `;
 
-        const [results] = await sequelize.query<any>(query, { type: QueryTypes.SELECT });
+        const [articleResults] = await sequelize.query<any>(articleQuery, { type: QueryTypes.SELECT });
+        const [jobResults] = await sequelize.query<any>(jobQuery, { type: QueryTypes.SELECT });
 
         // Fetch global OpenAI API key credits to show on dashboard card
         const apiKey = await ApiKey.findOne({
@@ -302,13 +307,20 @@ export class ArticleFeedService {
             ? Number(((remaining / limit) * 100).toFixed(2))
             : null;
 
+        const articleTotal = parseInt(articleResults?.total || 0);
+        const draftCount = parseInt(articleResults?.draft || 0);
+        const publishedCount = parseInt(articleResults?.published || 0);
+        const pendingCount = parseInt(jobResults?.pending || 0);
+        const processingCount = parseInt(jobResults?.processing || 0);
+        const failedCount = parseInt(jobResults?.failed || 0);
+
         return {
-            total: parseInt(results?.total || 0),
-            draft: parseInt(results?.draft || 0),
-            published: parseInt(results?.published || 0),
-            pending: parseInt(results?.pending || 0),
-            processing: parseInt(results?.processing || 0),
-            failed: parseInt(results?.failed || 0),
+            total: articleTotal + pendingCount + processingCount,
+            draft: draftCount,
+            published: publishedCount,
+            pending: pendingCount,
+            processing: processingCount,
+            failed: failedCount,
             credits: {
                 provider: apiKey?.provider || 'openai',
                 // limit_usd: limit,
