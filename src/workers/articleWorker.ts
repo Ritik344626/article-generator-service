@@ -463,9 +463,6 @@ class ArticleGenerationWorker {
             }
         }
 
-        console.log('Base prompt from template/category:', basePrompt);
-        console.log('Job AI enhancement flag:', job);
-
         if (!basePrompt) {
             if (job.ai_enhancement) {
                 basePrompt = `You are an expert content writer. Analyze the PDF document and convert it into a well-structured, engaging HTML article. 
@@ -484,6 +481,8 @@ class ArticleGenerationWorker {
         if (job.custom_prompt) {
             basePrompt += `\n\nAdditional Instructions: ${job.custom_prompt}`;
         }
+
+        basePrompt += `\n\nSpacing Enforcement: Eliminate consecutive blank lines, stray extra spaces, redundant <br> tags, and empty paragraphs. Only include line breaks or spacing that is explicitly part of the source content or clearly improves readability.`;
 
         return basePrompt;
     }
