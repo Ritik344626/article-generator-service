@@ -46,11 +46,14 @@ class ArticleGenerationWorker {
     private worker: Worker;
     private storageService: CloudflareR2Service;
     private ai: GoogleGenAI | null;
+    private currentGeminiApiKey: string | null;
     private wpBaseUrl: string;
 
     constructor() {
         this.storageService = new CloudflareR2Service();
         this.wpBaseUrl = process.env.WP_BASE_URL || 'https://www.samvidalaw.com';
+        this.ai = null;
+        this.currentGeminiApiKey = null;
         this.worker = new Worker('article-generation', this.processJob.bind(this), {
             connection,
             concurrency: parseInt(process.env.WORKER_CONCURRENCY || '2', 10),
@@ -63,9 +66,7 @@ class ArticleGenerationWorker {
         const geminiApiKey = process.env.GEMINI_API_KEY;
         if (geminiApiKey) {
             this.ai = new GoogleGenAI({ apiKey: geminiApiKey });
-        } else {
-            this.ai = null;
-            logger.warn('GEMINI_API_KEY not configured; Gemini enhancements will be skipped');
+            this.currentGeminiApiKey = geminiApiKey;
         }
 
         this.worker.on('completed', (job) => {
@@ -114,6 +115,13 @@ class ArticleGenerationWorker {
             if (!apiKey) {
                 throw new Error(`No active API key found for provider: ${generationJob.provider}`);
             }
+
+            const resolvedModelName = this.resolveModelName(
+                generationJob.model_name,
+                apiKey.model_name,
+            );
+            generationJob.model_name = resolvedModelName;
+
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 40);
 
             const { articleHtml, imageSummary, usage: genUsage } = await this.generateArticleWithPDF(
@@ -121,7 +129,7 @@ class ArticleGenerationWorker {
                 pdfBuffer,
                 apiKey,
                 generationJob.provider,
-                generationJob.model_name
+                resolvedModelName
             );
             // Track usage from generation
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 75);
@@ -154,7 +162,6 @@ class ArticleGenerationWorker {
             const imageResult = await this.generateFeaturedImage(
                 title,
                 imageContextForPrompt,
-                apiKey,
                 jobId,
                 generationJob,
             );
@@ -183,7 +190,7 @@ class ArticleGenerationWorker {
                 prompt_template_id: generationJob.prompt_template_id || null,
                 pdf_url: resolvedPdfUrl || generationJob.pdf_url,
                 source_text: 'Generated from PDF using GPT-4 Vision',
-                ai_model: `${generationJob.provider}/${generationJob.model_name || 'default'}`,
+                ai_model: `${generationJob.provider}/${resolvedModelName}`,
                 ai_prompt: finalPrompt.substring(0, 5000),
                 author_wp_id: generationJob.wp_config?.author_wp_id || null,
                 featured_media_wp_id: featuredMediaId,
@@ -216,7 +223,7 @@ class ArticleGenerationWorker {
                     sanitizedHtml,
                     apiKey,
                     generationJob.provider,
-                    generationJob.model_name
+                    resolvedModelName
                 );
 
                 if (hiUsage) {
@@ -243,7 +250,7 @@ class ArticleGenerationWorker {
                     prompt_template_id: generationJob.prompt_template_id || null,
                     pdf_url: resolvedPdfUrl || generationJob.pdf_url,
                     source_text: `Hindi translation of article ${article.id}`,
-                    ai_model: `${generationJob.provider}/${generationJob.model_name || 'default'}`,
+                    ai_model: `${generationJob.provider}/${resolvedModelName}`,
                     ai_prompt: 'Hindi translation of generated article',
                     author_wp_id: generationJob.wp_config?.author_wp_id || null,
                     featured_media_wp_id: article.featured_media_wp_id || generationJob.wp_config?.featured_media_wp_id || null,
@@ -274,8 +281,7 @@ class ArticleGenerationWorker {
 
             // After successful content generation, estimate and deduct credit usage against API key (global)
             try {
-                const modelName = generationJob.model_name || 'gpt-4o-mini';
-                const costUsd = computeCostUSD(modelName, totalPromptTokens, totalCompletionTokens);
+                const costUsd = computeCostUSD(resolvedModelName, totalPromptTokens, totalCompletionTokens);
                 if (costUsd > 0) {
                     await this.deductApiKeyCredits(apiKey, costUsd);
                 }
@@ -639,17 +645,17 @@ class ArticleGenerationWorker {
         return await this.callOpenAIWithUploadedPdf(prompt, fileId, apiKey.api_key, model);
     }
 
-    private getGeminiClient(): GoogleGenAI | null {
-        if (this.ai) {
-            return this.ai;
-        }
-
-        const geminiApiKey = process.env.GEMINI_API_KEY;
-        if (!geminiApiKey) {
+    private getGeminiClient(apiKeyOverride?: string | null): GoogleGenAI | null {
+        const key = apiKeyOverride?.trim() || process.env.GEMINI_API_KEY || null;
+        if (!key) {
             return null;
         }
 
-        this.ai = new GoogleGenAI({ apiKey: geminiApiKey });
+        if (!this.ai || this.currentGeminiApiKey !== key) {
+            this.ai = new GoogleGenAI({ apiKey: key });
+            this.currentGeminiApiKey = key;
+        }
+
         return this.ai;
     }
 
@@ -667,13 +673,19 @@ class ArticleGenerationWorker {
             return articleHtml;
         }
 
-        const geminiClient = this.getGeminiClient();
+        const geminiApiKey = await this.selectApiKey('gemini');
+        const geminiKeyValue = geminiApiKey?.api_key || process.env.GEMINI_API_KEY || null;
+        const geminiClient = this.getGeminiClient(geminiKeyValue);
         if (!geminiClient) {
             logger.warn(`Gemini API key missing, skipping enhancement for job ${context.jobId}`);
             return articleHtml;
         }
 
-        const model = process.env.GEMINI_ENHANCEMENT_MODEL || 'gemini-2.5-flash';
+        const model = this.resolveModelName(
+            geminiApiKey?.model_name,
+            process.env.GEMINI_ENHANCEMENT_MODEL,
+            'gemini-2.5-flash'
+        );
         const temperatureEnv = Number(process.env.GEMINI_ENHANCEMENT_TEMPERATURE);
         const maxTokensEnv = Number(process.env.GEMINI_ENHANCEMENT_MAX_TOKENS);
         const temperature = Number.isFinite(temperatureEnv) ? temperatureEnv : 0.35;
@@ -752,7 +764,7 @@ class ArticleGenerationWorker {
             }
         } catch (error) {
             logger.warn('Failed to read Gemini response via text()', error);
-        }
+        } 
 
         const candidates = response?.response?.candidates || response?.candidates;
         if (Array.isArray(candidates) && candidates.length > 0) {
@@ -835,7 +847,6 @@ Do not summarize, omit, or add any content. Return ONLY the translated HTML, wit
     private async generateFeaturedImage(
         title: string,
         html: string,
-        apiKey: ApiKey,
         jobId: number,
         job: GenerationJob,
     ): Promise<{ mediaId: number; sourceUrl: string }> {
@@ -849,7 +860,11 @@ Do not summarize, omit, or add any content. Return ONLY the translated HTML, wit
         }
 
         const geminiApiKey = await this.selectApiKey('gemini');
-        const imageBuffer = await this.generateGeminiImage(prompt, geminiApiKey ?? apiKey);
+        if (!geminiApiKey) {
+            throw new Error('No Gemini API key configured for image generation');
+        }
+
+        const imageBuffer = await this.generateGeminiImage(prompt, geminiApiKey);
 
         if (!imageBuffer) {
             throw new Error('Gemini image generation returned empty output');
@@ -1067,6 +1082,24 @@ Do not summarize, omit, or add any content. Return ONLY the translated HTML, wit
         }
 
         return meta;
+    }
+
+    private resolveModelName(
+        primary?: string | null,
+        secondary?: string | null,
+        fallback = 'gpt-4.1-mini'
+    ): string {
+        const normalizedPrimary = primary?.trim();
+        if (normalizedPrimary) {
+            return normalizedPrimary;
+        }
+
+        const normalizedSecondary = secondary?.trim();
+        if (normalizedSecondary) {
+            return normalizedSecondary;
+        }
+
+        return fallback;
     }
 
     private extractTitle(html: string): string | null {
