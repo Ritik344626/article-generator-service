@@ -203,13 +203,13 @@ class ArticleGenerationWorker {
 
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 90);
 
-            // if (generationJob.publish_to_wp) {
-            //     await this.publishToWordPress(article, generationJob, {
-            //         imagePath: null,
-            //         imageUrl: generatedImageUrl,
-            //         existingMediaId: generatedImageMediaId,
-            //     });
-            // }
+            if (generationJob.publish_to_wp) {
+                await this.publishToWordPress(article, generationJob, {
+                    imagePath: null,
+                    imageUrl: generatedImageUrl,
+                    existingMediaId: generatedImageMediaId,
+                });
+            }
 
             let hindiArticle: Article | null = null;
             let totalPromptTokens = genUsage?.promptTokens || 0;
@@ -261,13 +261,13 @@ class ArticleGenerationWorker {
                     translation_of_article_id: article.id,
                 } as any);
 
-                // if (generationJob.publish_to_wp) {
-                //     await this.publishToWordPress(hindiArticle, generationJob, {
-                //         imagePath: null,
-                //         imageUrl: generatedImageUrl,
-                //         existingMediaId: generatedImageMediaId || article.featured_media_wp_id || generationJob.wp_config?.featured_media_wp_id || null,
-                //     });
-                // }
+                if (generationJob.publish_to_wp) {
+                    await this.publishToWordPress(hindiArticle, generationJob, {
+                        imagePath: null,
+                        imageUrl: generatedImageUrl,
+                        existingMediaId: generatedImageMediaId || article.featured_media_wp_id || generationJob.wp_config?.featured_media_wp_id || null,
+                    });
+                }
 
                 await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 95);
 
