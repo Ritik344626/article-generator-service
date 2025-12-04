@@ -171,27 +171,4 @@ export class GenerationController {
       });
     }
   }
-
-  async getArticle(req: Request, res: Response) {
-    try {
-      const articleId = req.params.articleId;
-      const article = await Article.findByPk(articleId);
-
-      if (!article) {
-        return createResponse(res, {
-          status: false,
-          payload: { message: 'Article not found' },
-          code: 404,
-        });
-      }
-
-      return createResponse(res, { status: true, payload: article });
-    } catch (error: any) {
-      return createResponse(res, {
-        status: false,
-        payload: { message: error.message },
-        code: 500,
-      });
-    }
-  }
 }

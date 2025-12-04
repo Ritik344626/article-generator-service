@@ -64,7 +64,4 @@ generationRouter.get('/:jobId', controller.getJob.bind(controller));
 // Cancel a job
 generationRouter.post('/:jobId/cancel', controller.cancelJob.bind(controller));
 
-// Get generated article
-generationRouter.get('/articles/:articleId', controller.getArticle.bind(controller));
-
 export default generationRouter;

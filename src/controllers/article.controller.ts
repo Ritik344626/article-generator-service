@@ -19,37 +19,13 @@ export class ArticleController {
             
             if (!article) {
                 return createResponse(res, {
-                    status: false,
-                    payload: { message: 'Article not found' },
-                    code: 404,
+                status: false,
+                payload: { message: 'Article not found' },
+                code: 404,
                 });
             }
 
-            const payload = {
-                id: article.id,
-                title: article.title,
-                content: article.content,
-                status: article.status,
-                pdf_url: article.pdf_url,
-                source_text: article.source_text,
-                ai_model: article.ai_model,
-                ai_prompt: article.ai_prompt,
-                featured_image_url: article.featured_image_url,
-                featured_media_wp_id: article.featured_media_wp_id,
-                wp_post_id: article.wp_post_id,
-                wp_permalink: article.wp_permalink,
-                author_wp_id: article.author_wp_id,
-                meta: article.meta,
-                tags: article.tags,
-                categories: article.categories,
-                prompt_template_id: article.prompt_template_id,
-                translation_of_article_id: article.translation_of_article_id,
-                error: article.error,
-                createdAt: article.createdAt,
-                updatedAt: article.updatedAt,
-            };
-
-            return createResponse(res, { status: true, payload });
+            return createResponse(res, { status: true, payload: article });
         } catch (error: any) {
             return createResponse(res, {
                 status: false,
