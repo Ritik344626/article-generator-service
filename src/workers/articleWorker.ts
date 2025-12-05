@@ -1068,20 +1068,30 @@ Do not summarize, omit, or add any content. Return ONLY the translated HTML, wit
     private applySeoDefaults(metaInput: any, title: string, htmlContent: string): Record<string, any> {
         const meta = this.cloneMeta(metaInput);
 
-        const titleCandidate = typeof meta.rank_math_title === 'string' ? meta.rank_math_title.trim() : '';
-        if (!titleCandidate) {
-            meta.rank_math_title = title;
-        }
+        const titleCandidateRaw = typeof meta.rank_math_title === 'string' ? meta.rank_math_title.trim() : '';
+        const finalTitle = titleCandidateRaw || title;
+        meta.rank_math_title = this.truncateSeoValue(finalTitle, 59);
 
-        const descriptionCandidate = typeof meta.rank_math_description === 'string'
+        const descriptionCandidateRaw = typeof meta.rank_math_description === 'string'
             ? meta.rank_math_description.trim()
             : '';
-        if (!descriptionCandidate) {
-            const plain = this.stripHtml(htmlContent || '').slice(0, 300).trim();
-            meta.rank_math_description = plain;
-        }
+        const finalDescription = descriptionCandidateRaw
+            || this.stripHtml(htmlContent || '').slice(0, 300).trim();
+        meta.rank_math_description = this.truncateSeoValue(finalDescription, 159);
 
         return meta;
+    }
+
+    private truncateSeoValue(value: string, maxLength: number): string {
+        if (!value) {
+            return '';
+        }
+
+        if (value.length <= maxLength) {
+            return value;
+        }
+
+        return value.slice(0, maxLength).trimEnd();
     }
 
     private resolveModelName(
