@@ -67,7 +67,8 @@ export class ArticleController {
 
     async getStats(req: Request, res: Response) {
         try {
-            const stats = await this.feedService.getArticleStats();
+            const authUser = req.user as User;
+            const stats = await this.feedService.getArticleStats(authUser);
             return createResponse(res, { status: true, payload: stats });
         } catch (error: any) {
             return createResponse(res, {

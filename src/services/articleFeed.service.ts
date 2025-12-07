@@ -301,15 +301,18 @@ export class ArticleFeedService {
     /**
      * Get article statistics for dashboard
      */
-    async getArticleStats() {
-        const articleQuery = `
+    async getArticleStats(currentUser?: User) {
+        const isAdmin = this.isAdminUser(currentUser);
+        const userId = currentUser?.id;
+
+        let articleQuery = `
             SELECT 
                 COUNT(*) as total,
                 SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) as draft,
                 SUM(CASE WHEN status = 'publish' THEN 1 ELSE 0 END) as published
             FROM articles
         `;
-        const jobQuery = `
+        let jobQuery = `
             SELECT 
                 SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
                 SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing,
@@ -317,14 +320,38 @@ export class ArticleFeedService {
             FROM generation_jobs
         `;
 
-        const [articleResults] = await sequelize.query<any>(articleQuery, { type: QueryTypes.SELECT });
-        const [jobResults] = await sequelize.query<any>(jobQuery, { type: QueryTypes.SELECT });
+        const queryReplacements: Record<string, any> = {};
 
-        // Fetch global OpenAI API key credits to show on dashboard card
-        const apiKey = await ApiKey.findOne({
-            where: { provider: 'openai', status: 'active' },
-            order: [["credits_remaining_usd_month", "DESC"]],
+        if (!isAdmin && userId) {
+            queryReplacements.userId = userId;
+            articleQuery += `
+                WHERE id IN (
+                    SELECT DISTINCT a.id FROM articles a
+                    LEFT JOIN generation_jobs agj ON agj.result_article_id = COALESCE(a.translation_of_article_id, a.id)
+                    WHERE agj.user_id = :userId
+                )
+            `;
+            jobQuery += `
+                WHERE user_id = :userId
+            `;
+        }
+
+        const [articleResults] = await sequelize.query<any>(articleQuery, { 
+            replacements: queryReplacements,
+            type: QueryTypes.SELECT 
         });
+        const [jobResults] = await sequelize.query<any>(jobQuery, { 
+            replacements: queryReplacements,
+            type: QueryTypes.SELECT 
+        });
+
+        let apiKey = null;
+        if (isAdmin) {
+            apiKey = await ApiKey.findOne({
+                where: { provider: 'openai', status: 'active' },
+                order: [["credits_remaining_usd_month", "DESC"]],
+            });
+        }
 
         const limit = apiKey ? Number((apiKey as any).credits_monthly_limit_usd ?? 0) : null;
         const remaining = apiKey ? Number((apiKey as any).credits_remaining_usd_month ?? 0) : null;
@@ -347,14 +374,10 @@ export class ArticleFeedService {
             pending: pendingCount,
             processing: processingCount,
             failed: failedCount,
-            credits: {
+            credits: isAdmin ? {
                 provider: apiKey?.provider || 'openai',
-                // limit_usd: limit,
-                // used_usd: used,
                 remaining_usd: remaining,
-                // percent_remaining,
-                // month_start: (apiKey as any)?.credits_month_start || null,
-            },
+            } : null,
         };
     }
 }

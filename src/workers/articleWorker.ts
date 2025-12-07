@@ -175,7 +175,8 @@ class ArticleGenerationWorker {
             const baseMeta = this.applySeoDefaults(
                 generationJob.wp_config?.meta,
                 title,
-                sanitizedHtml
+                sanitizedHtml,
+                resolvedPdfUrl || generationJob.pdf_url
             );
             const wpTags = Array.isArray(generationJob.wp_config?.tags) ? generationJob.wp_config?.tags : [];
             const wpCategories = Array.isArray(generationJob.wp_config?.categories) ? generationJob.wp_config?.categories : [];
@@ -240,7 +241,8 @@ class ArticleGenerationWorker {
                 const hindiMeta = this.applySeoDefaults(
                     hindiMetaBase,
                     hindiTitle,
-                    sanitizedHindiHtml
+                    sanitizedHindiHtml,
+                    resolvedPdfUrl || generationJob.pdf_url
                 );
 
                 hindiArticle = await Article.create({
@@ -271,7 +273,7 @@ class ArticleGenerationWorker {
 
                 await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 95);
 
-                const englishMeta = this.applySeoDefaults(article.meta, title, sanitizedHtml);
+                const englishMeta = this.applySeoDefaults(article.meta, title, sanitizedHtml, article.pdf_url);
                 englishMeta.hindi_translation_article_id = hindiArticle.id;
                 article.meta = englishMeta;
                 await article.save();
@@ -1065,7 +1067,7 @@ Do not summarize, omit, or add any content. Return ONLY the translated HTML, wit
         }
     }
 
-    private applySeoDefaults(metaInput: any, title: string, htmlContent: string): Record<string, any> {
+    private applySeoDefaults(metaInput: any, title: string, htmlContent: string, pdfUrl?: string | null): Record<string, any> {
         const meta = this.cloneMeta(metaInput);
 
         const titleCandidateRaw = typeof meta.rank_math_title === 'string' ? meta.rank_math_title.trim() : '';
@@ -1079,7 +1081,26 @@ Do not summarize, omit, or add any content. Return ONLY the translated HTML, wit
             || this.stripHtml(htmlContent || '').slice(0, 300).trim();
         meta.rank_math_description = this.truncateSeoValue(finalDescription, 159);
 
+        if (pdfUrl) {
+            meta.article_pdf = pdfUrl;
+        }
+
+        if (!meta.rank_math_focus_keyword) {
+            meta.rank_math_focus_keyword = this.extractFocusKeyword(title);
+        }
+
         return meta;
+    }
+
+    private extractFocusKeyword(title: string): string {
+        if (!title) return '';
+        
+        const stopWords = ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'];
+        const words = title.toLowerCase().split(/\s+/).filter(word => 
+            word.length > 2 && !stopWords.includes(word)
+        );
+        
+        return words.slice(0, 3).join(' ').trim();
     }
 
     private truncateSeoValue(value: string, maxLength: number): string {
@@ -1164,7 +1185,7 @@ Do not summarize, omit, or add any content. Return ONLY the translated HTML, wit
                 status: 'draft',
                 author: job.wp_config?.author_wp_id || wpUser.samvida_user_id || null,
                 featured_media: featuredMediaId,
-                meta: this.applySeoDefaults(article.meta, article.title, article.content),
+                meta: this.applySeoDefaults(article.meta, article.title, article.content, article.pdf_url),
                 tags: job.wp_config?.tags || null,
                 categories: job.wp_config?.categories || null,
             };
