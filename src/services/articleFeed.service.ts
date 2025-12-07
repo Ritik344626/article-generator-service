@@ -33,6 +33,7 @@ interface ArticleFeedRow {
     user_email: string | null;
     user_display_name: string | null;
     user_roles: any;
+    error: any | null;
 }
 
 export class ArticleFeedService {
@@ -63,17 +64,39 @@ export class ArticleFeedService {
             jobFilters.push('(gj.custom_prompt LIKE :search OR gj.prompt_category LIKE :search OR gj.result_preview LIKE :search)');
         }
 
-        if (query.articleStatus?.length) {
-            baseReplacements.articleStatuses = query.articleStatus;
+        let actualArticleStatus = query.articleStatus;
+        let actualJobStatus = query.jobStatus;
+        let explicitJobStatusFilter = false;
+        let explicitArticleStatusFilter = false;
+        
+        if (actualArticleStatus?.length) {
+            const jobStatusValues = Object.values(JobStatus);
+            const isJobStatus = actualArticleStatus.some(s => jobStatusValues.includes(s as any));
+            
+            if (isJobStatus) {
+                actualJobStatus = actualArticleStatus;
+                actualArticleStatus = undefined;
+                explicitJobStatusFilter = true;
+            } else {
+                explicitArticleStatusFilter = true;
+            }
+        }
+
+        if (actualJobStatus?.length) {
+            explicitJobStatusFilter = true;
+        }
+
+        if (actualArticleStatus?.length) {
+            baseReplacements.articleStatuses = actualArticleStatus;
             articleFilters.push('a.status IN (:articleStatuses)');
         }
 
-        const jobStatuses = query.jobStatus?.length ? query.jobStatus : [JobStatus.PENDING, JobStatus.PROCESSING];
+        const jobStatuses = actualJobStatus?.length ? actualJobStatus : [JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.FAILED];
         baseReplacements.jobStatuses = jobStatuses;
         jobFilters.push('gj.status IN (:jobStatuses)');
 
-        const includeArticles = typeFilter !== 'job';
-        const includeJobs = typeFilter !== 'article';
+        const includeArticles = typeFilter !== 'job' && !explicitJobStatusFilter;
+        const includeJobs = typeFilter !== 'article' && !explicitArticleStatusFilter;
 
         if (!includeArticles && !includeJobs) {
             throw new Error('Invalid type filter. Expected "article" or "job".');
@@ -125,7 +148,8 @@ export class ArticleFeedService {
                     ua.name AS user_name,
                     ua.email AS user_email,
                     ua.user_display_name AS user_display_name,
-                    ua.roles AS user_roles
+                    ua.roles AS user_roles,
+                    NULL AS error
                 FROM articles a
                 LEFT JOIN prompts p ON a.prompt_template_id = p.id
                 LEFT JOIN generation_jobs agj ON agj.result_article_id = COALESCE(a.translation_of_article_id, a.id)
@@ -153,7 +177,8 @@ export class ArticleFeedService {
                     uj.name AS user_name,
                     uj.email AS user_email,
                     uj.user_display_name AS user_display_name,
-                    uj.roles AS user_roles
+                    uj.roles AS user_roles,
+                    gj.error AS error
                 FROM generation_jobs gj
                 LEFT JOIN users uj ON uj.id = gj.user_id
                 ${jobWhereClause}
@@ -207,6 +232,7 @@ export class ArticleFeedService {
                 provider: row.provider,
                 prompt_category: row.prompt_category,
                 createdBy: this.buildCreatedBy(row),
+                error: row.error || null,
             })),
         };
     }
@@ -315,7 +341,7 @@ export class ArticleFeedService {
         const failedCount = parseInt(jobResults?.failed || 0);
 
         return {
-            total: articleTotal + pendingCount + processingCount,
+            total: articleTotal + processingCount + failedCount,
             draft: draftCount,
             published: publishedCount,
             pending: pendingCount,

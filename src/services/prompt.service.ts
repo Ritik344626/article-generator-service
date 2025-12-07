@@ -1,4 +1,5 @@
 import { Prompt } from '../models/Prompt';
+import { User } from '../models/User';
 import logger from '../utils/logger';
 
 export class PromptService {
@@ -67,7 +68,7 @@ export class PromptService {
         }
     }
 
-    async getPrompts(userId?: number, category?: string): Promise<[null | any, Array<Prompt> | null]> {
+    async getPrompts(userId?: number, category?: string): Promise<[null | any, Array<any> | null]> {
         try {
             const filters: any = { where: {} };
             
@@ -79,7 +80,34 @@ export class PromptService {
             }
 
             const prompts = await Prompt.findAll(filters);
-            return [null, prompts || []];
+
+            const creatorIds = Array.from(new Set(prompts.map((p) => p.created_by).filter(Boolean)));
+            const users = creatorIds.length
+                ? await User.findAll({
+                    where: { id: creatorIds },
+                    attributes: ['id', 'name', 'email', 'user_display_name', 'roles'],
+                })
+                : [];
+            const userMap = new Map(users.map((u) => [u.id, u]));
+
+            const enriched = prompts.map((p) => {
+                const payload = p.toJSON();
+                const creator = userMap.get(p.created_by);
+                return {
+                    ...payload,
+                    createdBy: creator
+                        ? {
+                            id: creator.id,
+                            name: creator.name,
+                            email: creator.email,
+                            displayName: creator.user_display_name,
+                            roles: creator.roles,
+                        }
+                        : null,
+                };
+            });
+
+            return [null, enriched];
         } catch (error) {
             logger.error('Error fetching prompts', error);
             return [error, null];
