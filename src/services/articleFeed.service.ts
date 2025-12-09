@@ -350,13 +350,10 @@ export class ArticleFeedService {
             type: QueryTypes.SELECT 
         });
 
-        let apiKey = null;
-        if (isAdmin) {
-            apiKey = await ApiKey.findOne({
-                where: { provider: 'openai', status: 'active' },
-                order: [["credits_remaining_usd_month", "DESC"]],
-            });
-        }
+        const apiKey = await ApiKey.findOne({
+            where: { provider: 'openai', status: 'active' },
+            order: [["credits_remaining_usd_month", "DESC"]],
+        });
 
         const limit = apiKey ? Number((apiKey as any).credits_monthly_limit_usd ?? 0) : null;
         const remaining = apiKey ? Number((apiKey as any).credits_remaining_usd_month ?? 0) : null;
@@ -379,10 +376,10 @@ export class ArticleFeedService {
             pending: pendingCount,
             processing: processingCount,
             failed: failedCount,
-            credits: isAdmin ? {
+            credits: {
                 provider: apiKey?.provider || 'openai',
                 remaining_usd: remaining,
-            } : null,
+            },
         };
     }
 }
