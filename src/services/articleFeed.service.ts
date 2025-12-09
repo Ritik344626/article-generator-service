@@ -145,7 +145,7 @@ export class ArticleFeedService {
                     a.featured_image_url AS featured_image_url,
                     a.pdf_url AS pdf_url,
                     NULL AS provider,
-                    p.category AS prompt_category,
+                    COALESCE(p.category, agj.prompt_category) AS prompt_category,
                     ua.id AS user_id,
                     ua.name AS user_name,
                     ua.email AS user_email,
@@ -177,7 +177,7 @@ export class ArticleFeedService {
                     NULL AS featured_image_url,
                     gj.pdf_url AS pdf_url,
                     gj.provider AS provider,
-                    gj.prompt_category AS prompt_category,
+                    COALESCE(gj.prompt_category, pj.category) AS prompt_category,
                     uj.id AS user_id,
                     uj.name AS user_name,
                     uj.email AS user_email,
@@ -185,6 +185,7 @@ export class ArticleFeedService {
                     uj.roles AS user_roles,
                     gj.error AS error
                 FROM generation_jobs gj
+                LEFT JOIN prompts pj ON pj.id = gj.prompt_template_id
                 LEFT JOIN users uj ON uj.id = gj.user_id
                 ${jobWhereClause}
             `);

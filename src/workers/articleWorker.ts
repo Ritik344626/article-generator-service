@@ -159,15 +159,26 @@ class ArticleGenerationWorker {
                 imageContextForPrompt = imageContextForPrompt.substring(0, 2500);
 }
 
-            const imageResult = await this.generateFeaturedImage(
-                title,
-                imageContextForPrompt,
-                jobId,
-                generationJob,
-            );
+            let imageResult: { mediaId: number; sourceUrl: string } | null = null;
+            const hasImageContext = imageContextForPrompt?.trim().length > 0;
 
-            generatedImageUrl = imageResult.sourceUrl;
-            generatedImageMediaId = imageResult.mediaId;
+            if (hasImageContext) {
+                try {
+                    imageResult = await this.generateFeaturedImage(
+                        title,
+                        imageContextForPrompt,
+                        jobId,
+                        generationJob,
+                    );
+                } catch (error: any) {
+                    logger.warn(`Skipping featured image generation for job ${jobId}: ${error?.message || error}`);
+                }
+            } else {
+                logger.warn(`Skipping featured image generation for job ${jobId}: missing article content`);
+            }
+
+            generatedImageUrl = imageResult?.sourceUrl || null;
+            generatedImageMediaId = imageResult?.mediaId || null;
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 85);
 
             const resolvedPdfUrl = await this.resolveArticlePdfUrl(articlePdfUrl, tempFilePath, generationJob);
@@ -531,8 +542,17 @@ class ArticleGenerationWorker {
 
         const systemText = `
             You are an expert legal content writer and case analyst.
-            1) Convert the supplied PDF into a clean, well-structured, SEO-friendly HTML article using semantic tags (<h1>, <h2>, <h3>, <p>, <ul>, <ol>, etc.). Preserve facts from the PDF without inventing new facts.
-            2) ALSO produce a separate detailed legal-context summary between 800 and 1000 words (follow very strictly) for use by an image-generation model. The summary should include: case type, parties/roles (petitioner/respondent/etc.), court or authority, relevant statutes/sections if present, chronology of key events, orders/notices/appeals/execution steps, and current procedural status. Do NOT invent facts.
+            1) Convert the supplied PDF into clean, well-structured, SEO-friendly HTML using semantic tags. Preserve facts from the PDF without inventing new facts.
+            2) Always return valid HTML only (no markdown/plaintext). Strictly forbid markdown markers like **bold**, __underline__, *, -, #, or code fences, and instead use proper HTML tags (<strong>, <em>, <ul>, <ol>, <li>, etc.). Use <h1>-<h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <table>, <thead>, <tbody>, <tr>, <th>, <td> as appropriate.
+            3) Structure dynamically based on the case, but ensure coverage of:
+               - A single <h1> SEO title mentioning the Patna High Court and the year of judgment.
+               - A detailed explanation section (700-900 words) in plain legal English.
+               - A section on significance/implications.
+               - A section on legal issue(s) decided and the court’s decision, with bullet reasoning points.
+               - Sections for cited/referred judgments (skip if none), case title/number, citation(s) (write “To be added manually” if missing), coram/judges (prefix Hon’ble), advocates (with who they appeared for), and link to judgment.
+            4) Headings and order should be chosen to best fit the document context; do not hardcode the same heading text each time. Favor concise, meaningful headings.
+            5) Avoid real party names; use roles (petitioner, respondent, plaintiff, defendant, litigant, aggrieved person).
+            6) ALSO produce a separate detailed legal-context summary between 800 and 1000 words (strict) for image generation. Include: case type, roles, court/authority, statutes/sections, chronology, orders/notices/appeals/execution steps, current procedural status. Do NOT invent facts.
 
             Output MUST be EXACTLY in this XML format (nothing outside these tags):
 
@@ -541,7 +561,7 @@ class ArticleGenerationWorker {
             </article_html>
 
             <image_summary>
-            ... plain text 600-800 word summary here ...
+            ... plain text 800-1000 word summary here ...
             </image_summary>
             `;
 
@@ -587,15 +607,18 @@ class ArticleGenerationWorker {
         const articleMatch = raw.match(/<article_html>([\s\S]*?)<\/article_html>/i);
         const summaryMatch = raw.match(/<image_summary>([\s\S]*?)<\/image_summary>/i);
 
-        const articleHtml = articleMatch ? articleMatch[1].trim() : "";
-        const imageSummary = summaryMatch ? summaryMatch[1].trim() : "";
+        let articleHtml = articleMatch ? articleMatch[1].trim() : '';
+        let imageSummary = summaryMatch ? summaryMatch[1].trim() : '';
 
         if (!articleHtml) {
-            logger.warn("OpenAI response missing <article_html> tag. Raw output truncated to 2000 chars:", raw.substring(0, 2000));
+            logger.warn("OpenAI response missing <article_html> tag. Using full raw output as article_html. Raw output truncated to 2000 chars:", raw.substring(0, 2000));
+            articleHtml = raw.trim();
         }
 
         if (!imageSummary) {
-            logger.warn("OpenAI response missing <image_summary> tag. Falling back to article content for image context.");
+            logger.warn("OpenAI response missing <image_summary> tag. Falling back to stripped article content for image context.");
+            const fallbackSummary = this.stripHtml(articleHtml).trim();
+            imageSummary = fallbackSummary || raw.substring(0, 2000).trim();
         }
 
         const usageRaw = res.data?.usage || {};
@@ -795,8 +818,10 @@ class ArticleGenerationWorker {
 
         const model = modelName || 'gpt-4.1-mini';
         const systemPrompt = `You are a professional legal translator. Translate the provided HTML article into Hindi.
-Keep every HTML tag, attribute, number, and formatting exactly the same, only change the human-readable text to Hindi.
-Do not summarize, omit, or add any content. Return ONLY the translated HTML, with no explanations.`;
+            Keep every HTML tag, attribute, number, and formatting exactly the same, only change the human-readable text to Hindi.
+            Do not summarize, omit, or add any content.
+            Do NOT leave English words or phrases in the Hindi output unless they are proper nouns or citations. Use Hindi equivalents for headings and common nouns.
+            Return ONLY the translated HTML, with no explanations.`;
 
         const response = await axios.post(
             'https://api.openai.com/v1/responses',

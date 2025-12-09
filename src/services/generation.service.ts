@@ -42,6 +42,12 @@ export class GenerationService {
 
       const uuid = uuidv4();
       const provider = input.model_provider || 'openai';
+
+      let resolvedPromptCategory = input.prompt_category || null;
+      if (!resolvedPromptCategory && input.prompt_template_id) {
+        const tmpl = await Prompt.findByPk(input.prompt_template_id);
+        resolvedPromptCategory = tmpl?.category || null;
+      }
       
       // Convert file path to file:// URL if uploaded
       let pdfUrl = input.pdf_url || input.pdf_link || '';
@@ -56,7 +62,7 @@ export class GenerationService {
         user_id: userId,
         pdf_url: pdfUrl,
         prompt_template_id: input.prompt_template_id || null,
-        prompt_category: input.prompt_category || null,
+        prompt_category: resolvedPromptCategory,
         custom_prompt: input.custom_prompt || null,
         ai_enhancement: input.ai_enhancement !== false,
         provider,
