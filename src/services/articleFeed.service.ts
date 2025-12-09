@@ -125,7 +125,9 @@ export class ArticleFeedService {
         const jobWhereClause = jobFilters.length ? `WHERE ${jobFilters.join(' AND ')}` : '';
 
         const processingTitle = process.env.JOB_PROCESSING_PLACEHOLDER_TITLE || 'Processing Article...';
+        const failedTitle = process.env.JOB_FAILED_PLACEHOLDER_TITLE || 'Failed to Generate';
         baseReplacements.processingTitle = processingTitle;
+        baseReplacements.failedTitle = failedTitle;
 
         const segments: string[] = [];
 
@@ -162,7 +164,10 @@ export class ArticleFeedService {
             segments.push(`
                 SELECT
                     gj.id AS record_id,
-                    COALESCE(gj.result_preview, :processingTitle) AS title,
+                    CASE 
+                        WHEN gj.status = 'failed' THEN :failedTitle
+                        ELSE COALESCE(gj.result_preview, :processingTitle)
+                    END AS title,
                     gj.status AS status,
                     'job' AS record_type,
                     gj.uuid AS uuid,
