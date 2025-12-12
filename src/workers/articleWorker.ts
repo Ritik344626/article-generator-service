@@ -150,6 +150,7 @@ class ArticleGenerationWorker {
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 80);
 
             const title = this.extractTitle(sanitizedHtml) || 'Generated Article';
+            const contentWithoutTitle = this.removeTitle(sanitizedHtml);
 
             let imageContextForPrompt = (imageSummary && imageSummary.trim().length > 0)
                 ? imageSummary
@@ -197,7 +198,7 @@ class ArticleGenerationWorker {
 
             const article = await Article.create({
                 title,
-                content: sanitizedHtml,
+                content: contentWithoutTitle,
                 status: 'draft',
                 prompt_template_id: generationJob.prompt_template_id || null,
                 pdf_url: resolvedPdfUrl || generationJob.pdf_url,
@@ -245,6 +246,7 @@ class ArticleGenerationWorker {
 
                 const sanitizedHindiHtml = this.sanitizeHtml(hindiHtml);
                 const hindiTitle = this.extractTitle(sanitizedHindiHtml) || `${title} (Hindi)`;
+                const hindiContentWithoutTitle = this.removeTitle(sanitizedHindiHtml);
 
                 const hindiMetaBase = this.cloneMeta(generationJob.wp_config?.meta);
                 hindiMetaBase.translation_language = 'hi';
@@ -258,7 +260,7 @@ class ArticleGenerationWorker {
 
                 hindiArticle = await Article.create({
                     title: hindiTitle,
-                    content: sanitizedHindiHtml,
+                    content: hindiContentWithoutTitle,
                     status: 'draft',
                     prompt_template_id: generationJob.prompt_template_id || null,
                     pdf_url: resolvedPdfUrl || generationJob.pdf_url,
@@ -292,7 +294,6 @@ class ArticleGenerationWorker {
 
             await this.updateApiKeyUsage(apiKey);
 
-            // After successful content generation, estimate and deduct credit usage against API key (global)
             try {
                 const costUsd = computeCostUSD(resolvedModelName, totalPromptTokens, totalCompletionTokens);
                 if (costUsd > 0) {
@@ -821,7 +822,7 @@ class ArticleGenerationWorker {
             Keep every HTML tag, attribute, number, and formatting exactly the same, only change the human-readable text to Hindi.
             Do not summarize, omit, or add any content.
             Do NOT leave English words or phrases in the Hindi output unless they are proper nouns or citations. Use Hindi equivalents for headings and common nouns.
-            Return ONLY the translated HTML, with no explanations.`;
+            Return ONLY the translated HTML, with no explanations, no markdown code fences, no ''' or \`\`\`html wrappers.`;
 
         const response = await axios.post(
             'https://api.openai.com/v1/responses',
@@ -858,11 +859,13 @@ class ArticleGenerationWorker {
             }
         );
 
-        const translatedHtml = response.data?.output?.[0]?.content?.[0]?.text?.trim();
+        let translatedHtml = response.data?.output?.[0]?.content?.[0]?.text?.trim();
         if (!translatedHtml) {
             logger.error('Hindi translation failed, unexpected response', response.data);
             throw new Error('Failed to translate article to Hindi');
         }
+
+        translatedHtml = translatedHtml.replace(/^```html\s*\n?/i, '').replace(/\n?```\s*$/i, '');
 
         const usageRaw = response.data?.usage || {};
         const promptTokens = usageRaw.prompt_tokens ?? usageRaw.input_tokens ?? 0;
@@ -1164,6 +1167,10 @@ class ArticleGenerationWorker {
             return h1Match[1].replace(/<[^>]*>/g, '').trim();
         }
         return null;
+    }
+
+    private removeTitle(html: string): string {
+        return html.replace(/<h1[^>]*>.*?<\/h1>/i, '').trim();
     }
 
     private async publishToWordPress(
