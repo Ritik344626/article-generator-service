@@ -554,6 +554,7 @@ class ArticleGenerationWorker {
             4) Headings and order should be chosen to best fit the document context; do not hardcode the same heading text each time. Favor concise, meaningful headings.
             5) Avoid real party names; use roles (petitioner, respondent, plaintiff, defendant, litigant, aggrieved person).
             6) ALSO produce a separate detailed legal-context summary between 800 and 1000 words (strict) for image generation. Include: case type, roles, court/authority, statutes/sections, chronology, orders/notices/appeals/execution steps, current procedural status. Do NOT invent facts.
+            7) CRITICAL: Do NOT wrap the HTML output in markdown code fences. Do NOT start with \`\`\`html or end with \`\`\`. Return ONLY clean HTML inside the XML tags.
 
             Output MUST be EXACTLY in this XML format (nothing outside these tags):
 
@@ -621,6 +622,8 @@ class ArticleGenerationWorker {
             const fallbackSummary = this.stripHtml(articleHtml).trim();
             imageSummary = fallbackSummary || raw.substring(0, 2000).trim();
         }
+
+        articleHtml = articleHtml.replace(/^```html\s*\n?/i, '').replace(/\n?```\s*$/i, '');
 
         const usageRaw = res.data?.usage || {};
         const promptTokens = usageRaw.prompt_tokens ?? usageRaw.input_tokens ?? 0;
@@ -822,7 +825,7 @@ class ArticleGenerationWorker {
             Keep every HTML tag, attribute, number, and formatting exactly the same, only change the human-readable text to Hindi.
             Do not summarize, omit, or add any content.
             Do NOT leave English words or phrases in the Hindi output unless they are proper nouns or citations. Use Hindi equivalents for headings and common nouns.
-            Return ONLY the translated HTML, with no explanations, no markdown code fences, no ''' or \`\`\`html wrappers.`;
+            CRITICAL: Do NOT wrap the HTML in markdown code fences (no \`\`\`html at start or \`\`\` at end). Return ONLY the clean translated HTML with no explanations.`;
 
         const response = await axios.post(
             'https://api.openai.com/v1/responses',
