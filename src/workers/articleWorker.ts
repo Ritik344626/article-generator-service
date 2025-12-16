@@ -124,7 +124,7 @@ class ArticleGenerationWorker {
 
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 40);
 
-            const { articleHtml, imageSummary, usage: genUsage } = await this.generateArticleWithPDF(
+            const { articleHtml, imageSummary, categories, tags, imageSeo, usage: genUsage } = await this.generateArticleWithPDF(
                 finalPrompt,
                 pdfBuffer,
                 apiKey,
@@ -170,6 +170,7 @@ class ArticleGenerationWorker {
                         imageContextForPrompt,
                         jobId,
                         generationJob,
+                        imageSeo,
                     );
                 } catch (error: any) {
                     logger.warn(`Skipping featured image generation for job ${jobId}: ${error?.message || error}`);
@@ -182,6 +183,29 @@ class ArticleGenerationWorker {
             generatedImageMediaId = imageResult?.mediaId || null;
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 85);
 
+            // Get or create categories in Samvida
+            const categoryIds: number[] = [];
+            if (categories && categories.length > 0) {
+                try {
+                    const wpUser = await User.findByPk(generationJob.user_id);
+                    if (wpUser && wpUser.samvida_token) {
+                        for (const categoryName of categories) {
+                            if (categoryName && categoryName.trim() !== '' && categoryName !== 'Uncategorized') {
+                                try {
+                                    const catId = await this.getOrCreateCategory(wpUser.samvida_token, categoryName);
+                                    categoryIds.push(catId);
+                                    logger.info(`Category "${categoryName}" resolved to ID ${catId} for job ${jobId}`);
+                                } catch (err: any) {
+                                    logger.warn(`Failed to get/create category "${categoryName}" for job ${jobId}: ${err?.message || err}`);
+                                }
+                            }
+                        }
+                    }
+                } catch (error: any) {
+                    logger.warn(`Failed to process categories for job ${jobId}: ${error?.message || error}`);
+                }
+            }
+
             const resolvedPdfUrl = await this.resolveArticlePdfUrl(articlePdfUrl, tempFilePath, generationJob);
 
             const baseMeta = this.applySeoDefaults(
@@ -190,8 +214,45 @@ class ArticleGenerationWorker {
                 sanitizedHtml,
                 resolvedPdfUrl || generationJob.pdf_url
             );
+            if (imageSeo && typeof imageSeo === 'object') {
+                (baseMeta as any).image_seo = imageSeo;
+            }
             const wpTags = Array.isArray(generationJob.wp_config?.tags) ? generationJob.wp_config?.tags : [];
-            const wpCategories = Array.isArray(generationJob.wp_config?.categories) ? generationJob.wp_config?.categories : [];
+            let wpCategories = Array.isArray(generationJob.wp_config?.categories) ? generationJob.wp_config?.categories : [];
+            
+            // Add generated category IDs if available
+            for (const catId of categoryIds) {
+                if (!wpCategories.includes(catId)) {
+                    wpCategories = [...wpCategories, catId];
+                }
+            }
+
+            // Resolve tags to WordPress tag IDs
+            const tagIds: number[] = [];
+            if (tags && tags.length > 0) {
+                const wpUserForTags = await User.findByPk(generationJob.user_id);
+                const tokenForTags = wpUserForTags?.samvida_token || null;
+                if (tokenForTags) {
+                    for (const tagName of tags) {
+                        if (tagName && tagName.trim().length > 0) {
+                            try {
+                                const tId = await this.getOrCreateTag(tokenForTags, tagName.trim());
+                                tagIds.push(tId);
+                            } catch (e: any) {
+                                logger.warn(`Failed to get/create tag "${tagName}": ${e?.message || e}`);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Merge resolved tag IDs into wpTags
+            for (const tId of tagIds) {
+                if (!wpTags.includes(tId as any)) {
+                    (wpTags as any[]).push(tId);
+                }
+            }
+            
             const featuredMediaId = generatedImageMediaId
                 ?? generationJob.wp_config?.featured_media_wp_id
                 ?? null;
@@ -251,6 +312,10 @@ class ArticleGenerationWorker {
                 const hindiMetaBase = this.cloneMeta(generationJob.wp_config?.meta);
                 hindiMetaBase.translation_language = 'hi';
                 hindiMetaBase.translation_of_article_id = article.id;
+                // Carry over image SEO (media-level) info from English article meta for reference
+                if (article.meta && (article.meta as any).image_seo && !hindiMetaBase.image_seo) {
+                    (hindiMetaBase as any).image_seo = (article.meta as any).image_seo;
+                }
                 const hindiMeta = this.applySeoDefaults(
                     hindiMetaBase,
                     hindiTitle,
@@ -502,7 +567,7 @@ class ArticleGenerationWorker {
             basePrompt += `\n\nAdditional Instructions: ${job.custom_prompt}`;
         }
 
-        basePrompt += `\n\nSpacing Enforcement: Eliminate consecutive blank lines, stray extra spaces, redundant <br> tags, and empty paragraphs. Only include line breaks or spacing that is explicitly part of the source content or clearly improves readability.`;
+        basePrompt += `\n\nSpacing Enforcement: Eliminate consecutive blank lines, extra spaces, redundant <br> tags, and empty paragraphs. Include only intentional spacing that improves readability.`;
 
         return basePrompt;
     }
@@ -539,23 +604,36 @@ class ArticleGenerationWorker {
         fileId: string,
         apiKey: string,
         model: string
-    ): Promise<{ articleHtml: string; imageSummary: string; usage?: { promptTokens: number; completionTokens: number } }> {
+    ): Promise<{ articleHtml: string; imageSummary: string; categories: string[]; tags: string[]; imageSeo?: { title?: string; alt_text?: string; caption?: string; description?: string }; usage?: { promptTokens: number; completionTokens: number } }> {
 
         const systemText = `
-            You are an expert legal content writer and case analyst.
-            1) Convert the supplied PDF into clean, well-structured, SEO-friendly HTML using semantic tags. Preserve facts from the PDF without inventing new facts.
-            2) Always return valid HTML only (no markdown/plaintext). Strictly forbid markdown markers like **bold**, __underline__, *, -, #, or code fences, and instead use proper HTML tags (<strong>, <em>, <ul>, <ol>, <li>, etc.). Use <h1>-<h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <table>, <thead>, <tbody>, <tr>, <th>, <td> as appropriate.
+            You are a expert legal content writer and case analyst.
+            Your tasks:
+            1) You must generate a legally accurate, SEO-optimized case analysis article based strictly on the provided judgment content. Do NOT invent facts, dates, parties, citations, or procedural steps.
+            2) Return valid HTML only (no markdown). Strictly forbid markdown markers like **bold**, __underline__, *, -, #, or code fences. For styling, use semantic tags only: <h1>-<h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <blockquote>, <table>, <thead>, <tbody>, <tr>, <th>, <td>. Avoid inline styles.
             3) Structure dynamically based on the case, but ensure coverage of:
                - A single <h1> SEO title mentioning the Patna High Court and the year of judgment.
-               - A detailed explanation section (700-900 words) in plain legal English.
+               - A detailed explanation section (1000-1200 words) in plain legal English.
                - A section on significance/implications.
                - A section on legal issue(s) decided and the court’s decision, with bullet reasoning points.
                - Sections for cited/referred judgments (skip if none), case title/number, citation(s) (write “To be added manually” if missing), coram/judges (prefix Hon’ble), advocates (with who they appeared for), and link to judgment.
             4) Headings and order should be chosen to best fit the document context; do not hardcode the same heading text each time. Favor concise, meaningful headings.
-            5) Avoid real party names; use roles (petitioner, respondent, plaintiff, defendant, litigant, aggrieved person).
-            6) ALSO produce a separate detailed legal-context summary between 800 and 1000 words (strict) for image generation. Include: case type, roles, court/authority, statutes/sections, chronology, orders/notices/appeals/execution steps, current procedural status. Do NOT invent facts.
-            7) CRITICAL: Do NOT wrap the HTML output in markdown code fences. Do NOT start with \`\`\`html or end with \`\`\`. Return ONLY clean HTML inside the XML tags.
-
+            5) Anonymize parties where necessary (use roles like petitioner/respondent etc.). Preserve dates, citations, and section numbers exactly.
+            6) ALSO produce a separate detailed legal-context summary between 800 and 1000 words for image generation. Include: case type, roles, court/authority, statutes/sections, chronology with dates, orders/notices/appeals/execution steps, and current procedural status. Do NOT invent facts.
+            7) Generate appropriate category name(s) for this article based on the legal domain, case type, or subject matter. 
+               - If the document fits multiple distinct legal areas, identify most relevant categories from the examples below or create new ones.
+               - If the document clearly fits only ONE category, return just that single category name.
+               - Return category names separated by commas, ordered by relevance (most relevant first).
+               Examples: "Criminal Law", "Civil Procedure", "Constitutional Law", "Family Law", "Corporate Law", "Administrative Law", "Labor Law", "Intellectual Property", "Real Property", "Contract Law", "Tort Law", "Evidence", "Taxation", "Arbitration", "Mediation", etc.
+            9) Generate IMAGE SEO metadata suitable for a WordPress media item for the featured image that would illustrate this case. Base these fields ONLY on the case content (no inventions):
+                - <title> up to 90 characters max (no quotes), concise and descriptive; may append "– Illustration" if natural.
+                - <alt_text> a single sentence up to 140 characters, describing the key visual in context.
+                - <caption> a short caption up to 300 characters.
+                - <description> a paragraph up to 800 characters summarizing what the image depicts in relation to the case.
+            8) Generate suitable tags, based strictly on the document’s content (case type, statutes/sections, parties, court/authority, procedures, remedies, chronology terms).
+                - Return comma-separated values; prefer concise phrases (e.g., "Section 138 NI Act", "eviction", "public demand recovery", "bail", "appeal").
+                - Do NOT include categories here; tags should be more granular than categories.
+            9) CRITICAL: Do NOT wrap the HTML output in markdown code fences. Do NOT start with \`\`\`html or end with \`\`\`. Return ONLY clean HTML inside the XML tags.
             Output MUST be EXACTLY in this XML format (nothing outside these tags):
 
             <article_html>
@@ -565,6 +643,20 @@ class ArticleGenerationWorker {
             <image_summary>
             ... plain text 800-1000 word summary here ...
             </image_summary>
+
+            <categories>
+            ... comma-separated category names (e.g., "Criminal Law, Evidence, Constitutional Law") ...
+            </categories>
+
+            <tags>
+            ... comma-separated keyword tags (e.g., "eviction, tenancy, rent arrears, Section 21, appeal") ...
+            </tags>
+            <image_seo>
+                <title>...</title>
+                <alt_text>...</alt_text>
+                <caption>...</caption>
+                <description>...</description>
+            </image_seo>
             `;
 
         const res = await axios.post(
@@ -608,9 +700,15 @@ class ArticleGenerationWorker {
 
         const articleMatch = raw.match(/<article_html>([\s\S]*?)<\/article_html>/i);
         const summaryMatch = raw.match(/<image_summary>([\s\S]*?)<\/image_summary>/i);
+        const categoriesMatch = raw.match(/<categories>([\s\S]*?)<\/categories>/i);
+        const tagsMatch = raw.match(/<tags>([\s\S]*?)<\/tags>/i);
+        const seoBlockMatch = raw.match(/<image_seo>([\s\S]*?)<\/image_seo>/i);
 
         let articleHtml = articleMatch ? articleMatch[1].trim() : '';
         let imageSummary = summaryMatch ? summaryMatch[1].trim() : '';
+        let categories: string[] = ['Uncategorized'];
+        let tags: string[] = [];
+        const imageSeo: { title?: string; alt_text?: string; caption?: string; description?: string } = {};
 
         if (!articleHtml) {
             logger.warn("OpenAI response missing <article_html> tag. Using full raw output as article_html. Raw output truncated to 2000 chars:", raw.substring(0, 2000));
@@ -625,11 +723,53 @@ class ArticleGenerationWorker {
 
         articleHtml = articleHtml.replace(/^```html\s*\n?/i, '').replace(/\n?```\s*$/i, '');
 
+        if (categoriesMatch && categoriesMatch[1].trim()) {
+            const categoriesText = categoriesMatch[1].trim();
+            categories = categoriesText
+                .split(',')
+                .map((cat: string) => cat.trim())
+                .filter((cat: string) => cat.length > 0);
+            if (categories.length === 0) {
+                categories = ['Uncategorized'];
+            }
+        } else {
+            logger.warn("OpenAI response missing <categories> tag. Using default ['Uncategorized'].");
+        }
+
+        if (tagsMatch && tagsMatch[1].trim()) {
+            const tagsText = tagsMatch[1].trim();
+            tags = tagsText
+                .split(',')
+                .map((t: string) => t.trim())
+                .filter((t: string) => t.length > 0)
+                .slice(0, 20);
+        } else {
+            logger.warn("OpenAI response missing <tags> tag. Proceeding without tags.");
+        }
+
+        // Parse image SEO if present
+        if (seoBlockMatch) {
+            const block = seoBlockMatch[1];
+            const extract = (tag: string) => {
+                const m = block.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'i'));
+                return m && m[1] ? m[1].trim() : '';
+            };
+            const t = extract('title');
+            const alt = extract('alt_text');
+            const cap = extract('caption');
+            const desc = extract('description');
+
+            if (t) imageSeo.title = t.slice(0, 120);
+            if (alt) imageSeo.alt_text = alt.slice(0, 200);
+            if (cap) imageSeo.caption = cap.slice(0, 400);
+            if (desc) imageSeo.description = desc.slice(0, 1200);
+        }
+
         const usageRaw = res.data?.usage || {};
         const promptTokens = usageRaw.prompt_tokens ?? usageRaw.input_tokens ?? 0;
         const completionTokens = usageRaw.completion_tokens ?? usageRaw.output_tokens ?? 0;
 
-        return { articleHtml, imageSummary, usage: { promptTokens, completionTokens } };
+        return { articleHtml, imageSummary, categories, tags, imageSeo, usage: { promptTokens, completionTokens } };
     }
 
     private async uploadPdfToOpenAI(
@@ -660,7 +800,7 @@ class ArticleGenerationWorker {
         apiKey: ApiKey,
         provider: string,
         modelName?: string | null
-    ): Promise<{ articleHtml: string; imageSummary: string; usage?: { promptTokens: number; completionTokens: number } }> {
+    ): Promise<{ articleHtml: string; imageSummary: string; categories: string[]; tags: string[]; imageSeo?: { title?: string; alt_text?: string; caption?: string; description?: string }; usage?: { promptTokens: number; completionTokens: number } }> {
 
         if (provider !== "openai") {
             throw new Error("Only OpenAI provider supported for PDF");
@@ -882,6 +1022,7 @@ class ArticleGenerationWorker {
         html: string,
         jobId: number,
         job: GenerationJob,
+        seoOverride?: { title?: string; alt_text?: string; caption?: string; description?: string },
     ): Promise<{ mediaId: number; sourceUrl: string }> {
         if (!html?.trim()) {
             throw new Error('Cannot generate featured image without article content');
@@ -903,7 +1044,10 @@ class ArticleGenerationWorker {
             throw new Error('Gemini image generation returned empty output');
         }
 
-        return this.uploadGeneratedImageToWordPress(imageBuffer, job, jobId);
+        const seo = (seoOverride && Object.keys(seoOverride).length > 0)
+            ? seoOverride
+            : this.buildImageSeoFields(title, this.stripHtml(html));
+        return this.uploadGeneratedImageToWordPress(imageBuffer, job, jobId, seo);
     }
 
     private async generateGeminiImage(
@@ -982,6 +1126,7 @@ class ArticleGenerationWorker {
         buffer: Buffer,
         job: GenerationJob,
         jobId: number,
+        seo?: { title?: string; alt_text?: string; caption?: string; description?: string },
     ): Promise<{ mediaId: number; sourceUrl: string }> {
         const wpUser = await User.findByPk(job.user_id);
         if (!wpUser) {
@@ -996,6 +1141,7 @@ class ArticleGenerationWorker {
         const retryDelayMs = Number(process.env.WP_IMAGE_UPLOAD_RETRY_DELAY_MS || 3000);
         const fileName = `article-${jobId}-${Date.now()}.png`;
         let lastError: any = null;
+        const authorId = job.wp_config?.author_wp_id || wpUser.samvida_user_id || null;
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
@@ -1005,6 +1151,8 @@ class ArticleGenerationWorker {
                     null,
                     buffer,
                     fileName,
+                    seo,
+                    authorId,
                 );
 
                 logger.info(`Uploaded featured image to WordPress media ${uploadResult.mediaId} for job ${job.id} (attempt ${attempt})`);
@@ -1207,7 +1355,25 @@ class ArticleGenerationWorker {
 
             if (!featuredMediaId && (mediaContext?.imagePath || mediaContext?.imageUrl)) {
                 logger.info(`Uploading featured image for article ${article.id} to WordPress`);
-                const uploadResult = await this.uploadImageToWordPress(token, mediaContext.imagePath, mediaContext.imageUrl);
+                const metaSeo = (article.meta && typeof article.meta === 'object' && (article.meta as any).image_seo)
+                    ? (article.meta as any).image_seo
+                    : null;
+                const seo = metaSeo && typeof metaSeo === 'object'
+                    ? metaSeo
+                    : this.buildImageSeoFields(
+                        article.title,
+                        this.stripHtml(article.content || '').slice(0, 600)
+                    );
+                const authorIdForMedia = job.wp_config?.author_wp_id || wpUser.samvida_user_id || null;
+                const uploadResult = await this.uploadImageToWordPress(
+                    token,
+                    mediaContext.imagePath,
+                    mediaContext.imageUrl,
+                    undefined,
+                    undefined,
+                    seo,
+                    authorIdForMedia,
+                );
                 featuredMediaId = uploadResult.mediaId;
                 article.featured_media_wp_id = uploadResult.mediaId;
                 article.featured_image_url = uploadResult.sourceUrl;
@@ -1221,8 +1387,8 @@ class ArticleGenerationWorker {
                 author: job.wp_config?.author_wp_id || wpUser.samvida_user_id || null,
                 featured_media: featuredMediaId,
                 meta: this.applySeoDefaults(article.meta, article.title, article.content, article.pdf_url),
-                tags: job.wp_config?.tags || null,
-                categories: job.wp_config?.categories || null,
+                tags: article.tags || job.wp_config?.tags || null,
+                categories: article.categories || job.wp_config?.categories || null,
             };
 
             const wpPost = await this.createWordPressDraft(token, wpPostPayload);
@@ -1252,12 +1418,85 @@ class ArticleGenerationWorker {
         return `${base}${suffix}`;
     }
 
+    private async getOrCreateCategory(token: string, name: string): Promise<number> {
+        try {
+            // First check if category exists
+            const searchUrl = this.getWordPressEndpoint(`/wp-json/wp/v2/categories?search=${encodeURIComponent(name)}`);
+            const searchRes = await axios.get(searchUrl, {
+                headers: { Authorization: `Bearer ${token}` },
+                timeout: 30000,
+            });
+
+            if (searchRes.data && Array.isArray(searchRes.data) && searchRes.data.length > 0) {
+                // Return existing category ID
+                const existingCategory = searchRes.data[0];
+                logger.info(`Found existing category: "${name}" with ID ${existingCategory.id}`);
+                return existingCategory.id;
+            }
+
+            // Create new category
+            const createUrl = this.getWordPressEndpoint('/wp-json/wp/v2/categories');
+            const createRes = await axios.post(
+                createUrl,
+                { name },
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${token}`,
+                    },
+                    timeout: 30000,
+                }
+            );
+
+            logger.info(`Created new category: "${name}" with ID ${createRes.data.id}`);
+            return createRes.data.id;
+        } catch (error: any) {
+            logger.error('Error in getOrCreateCategory:', error?.response?.data || error?.message || error);
+            throw new Error(`Failed to get or create category "${name}": ${error?.message || 'Unknown error'}`);
+        }
+    }
+
+    private async getOrCreateTag(token: string, name: string): Promise<number> {
+        try {
+            const searchUrl = this.getWordPressEndpoint(`/wp-json/wp/v2/tags?search=${encodeURIComponent(name)}`);
+            const searchRes = await axios.get(searchUrl, {
+                headers: { Authorization: `Bearer ${token}` },
+                timeout: 30000,
+            });
+
+            if (searchRes.data && Array.isArray(searchRes.data) && searchRes.data.length > 0) {
+                const existing = searchRes.data[0];
+                return existing.id;
+            }
+
+            const createUrl = this.getWordPressEndpoint('/wp-json/wp/v2/tags');
+            const createRes = await axios.post(
+                createUrl,
+                { name },
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${token}`,
+                    },
+                    timeout: 30000,
+                }
+            );
+
+            return createRes.data.id;
+        } catch (error: any) {
+            logger.error('Error in getOrCreateTag:', error?.response?.data || error?.message || error);
+            throw new Error(`Failed to get or create tag "${name}": ${error?.message || 'Unknown error'}`);
+        }
+    }
+
     private async uploadImageToWordPress(
         token: string,
         imagePath?: string | null,
         fallbackUrl?: string | null,
         buffer?: Buffer | null,
         explicitFileName?: string,
+        seo?: { title?: string; alt_text?: string; caption?: string; description?: string },
+        authorId?: number | null,
     ): Promise<{ mediaId: number; sourceUrl: string }> {
         if (!imagePath && !fallbackUrl && !buffer) {
             throw new Error('No image available to upload to WordPress');
@@ -1277,6 +1516,19 @@ class ArticleGenerationWorker {
                 timeout: 120000,
             });
             formData.append('file', Buffer.from(response.data), { filename: fileName });
+        }
+
+        // Append SEO/meta fields for the media if provided
+        if (seo) {
+            const { title, alt_text, caption, description } = seo;
+            if (title && title.trim()) formData.append('title', title.trim());
+            if (alt_text && alt_text.trim()) formData.append('alt_text', alt_text.trim());
+            if (caption && caption.trim()) formData.append('caption', caption.trim());
+            if (description && description.trim()) formData.append('description', description.trim());
+        }
+
+        if (authorId !== undefined && authorId !== null) {
+            formData.append('author', String(authorId));
         }
 
         const wpResponse = await axios.post(
@@ -1303,6 +1555,31 @@ class ArticleGenerationWorker {
 
         logger.info(`Uploaded featured image to WordPress media ${mediaId}`);
         return { mediaId, sourceUrl };
+    }
+
+    private buildImageSeoFields(
+        articleTitle: string,
+        context: string
+    ): { title: string; alt_text: string; caption: string; description: string } {
+        const cleanTitle = (articleTitle || '').trim();
+        const baseTitle = cleanTitle.slice(0, 90);
+
+        const text = (context || '').replace(/\s+/g, ' ').trim();
+        const short = text.slice(0, 220);
+        const medium = text.slice(0, 400);
+        const long = text.slice(0, 800);
+
+        const imageTitle = baseTitle ? `${baseTitle} – Illustration` : 'Case Illustration';
+        const altText = baseTitle && short ? `${baseTitle}: ${short}`.slice(0, 140) : (short || 'Illustration for legal article');
+        const caption = baseTitle && medium ? `${baseTitle} – ${medium}`.slice(0, 300) : medium;
+        const description = long;
+
+        return {
+            title: imageTitle,
+            alt_text: altText,
+            caption: caption,
+            description: description,
+        };
     }
 
     private sanitizeWordPressPayload(payload: WordPressPostPayload): Record<string, any> {
