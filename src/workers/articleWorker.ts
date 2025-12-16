@@ -183,7 +183,6 @@ class ArticleGenerationWorker {
             generatedImageMediaId = imageResult?.mediaId || null;
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 85);
 
-            // Get or create categories in Samvida
             const categoryIds: number[] = [];
             if (categories && categories.length > 0) {
                 try {
@@ -215,7 +214,7 @@ class ArticleGenerationWorker {
                 resolvedPdfUrl || generationJob.pdf_url
             );
             if (imageSeo && typeof imageSeo === 'object') {
-                (baseMeta as any).image_seo = imageSeo;
+                baseMeta.image_seo = imageSeo;
             }
             const wpTags = Array.isArray(generationJob.wp_config?.tags) ? generationJob.wp_config?.tags : [];
             let wpCategories = Array.isArray(generationJob.wp_config?.categories) ? generationJob.wp_config?.categories : [];
@@ -246,10 +245,9 @@ class ArticleGenerationWorker {
                 }
             }
 
-            // Merge resolved tag IDs into wpTags
             for (const tId of tagIds) {
-                if (!wpTags.includes(tId as any)) {
-                    (wpTags as any[]).push(tId);
+                if (!wpTags.includes(tId)) {
+                    wpTags.push(tId);
                 }
             }
             
@@ -312,9 +310,8 @@ class ArticleGenerationWorker {
                 const hindiMetaBase = this.cloneMeta(generationJob.wp_config?.meta);
                 hindiMetaBase.translation_language = 'hi';
                 hindiMetaBase.translation_of_article_id = article.id;
-                // Carry over image SEO (media-level) info from English article meta for reference
-                if (article.meta && (article.meta as any).image_seo && !hindiMetaBase.image_seo) {
-                    (hindiMetaBase as any).image_seo = (article.meta as any).image_seo;
+                if (article.meta && article.meta.image_seo && !hindiMetaBase.image_seo) {
+                    hindiMetaBase.image_seo = article.meta.image_seo;
                 }
                 const hindiMeta = this.applySeoDefaults(
                     hindiMetaBase,
@@ -416,9 +413,9 @@ class ArticleGenerationWorker {
 
         if (needsReset) {
             const limit = Number(apiKey.credits_monthly_limit_usd || 100);
-            apiKey.credits_month_start = now as any;
-            apiKey.credits_used_usd_month = 0 as any;
-            apiKey.credits_remaining_usd_month = limit as any;
+            apiKey.credits_month_start = now;
+            apiKey.credits_used_usd_month = 0;
+            apiKey.credits_remaining_usd_month = limit;
         }
 
         const used = Number(apiKey.credits_used_usd_month || 0);
@@ -426,8 +423,8 @@ class ArticleGenerationWorker {
         const newUsed = Number((used + costUsd).toFixed(4));
         const newRemaining = Number((remaining - costUsd).toFixed(4));
 
-        apiKey.credits_used_usd_month = Math.max(0, newUsed) as any;
-        apiKey.credits_remaining_usd_month = Math.max(0, newRemaining) as any;
+        apiKey.credits_used_usd_month = Math.max(0, newUsed);
+        apiKey.credits_remaining_usd_month = Math.max(0, newRemaining);
 
         await apiKey.save();
 
@@ -747,7 +744,6 @@ class ArticleGenerationWorker {
             logger.warn("OpenAI response missing <tags> tag. Proceeding without tags.");
         }
 
-        // Parse image SEO if present
         if (seoBlockMatch) {
             const block = seoBlockMatch[1];
             const extract = (tag: string) => {
@@ -1044,10 +1040,7 @@ class ArticleGenerationWorker {
             throw new Error('Gemini image generation returned empty output');
         }
 
-        const seo = (seoOverride && Object.keys(seoOverride).length > 0)
-            ? seoOverride
-            : this.buildImageSeoFields(title, this.stripHtml(html));
-        return this.uploadGeneratedImageToWordPress(imageBuffer, job, jobId, seo);
+        return this.uploadGeneratedImageToWordPress(imageBuffer, job, jobId, seoOverride);
     }
 
     private async generateGeminiImage(
@@ -1141,7 +1134,6 @@ class ArticleGenerationWorker {
         const retryDelayMs = Number(process.env.WP_IMAGE_UPLOAD_RETRY_DELAY_MS || 3000);
         const fileName = `article-${jobId}-${Date.now()}.png`;
         let lastError: any = null;
-        const authorId = job.wp_config?.author_wp_id || wpUser.samvida_user_id || null;
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
@@ -1151,8 +1143,7 @@ class ArticleGenerationWorker {
                     null,
                     buffer,
                     fileName,
-                    seo,
-                    authorId,
+                    seo
                 );
 
                 logger.info(`Uploaded featured image to WordPress media ${uploadResult.mediaId} for job ${job.id} (attempt ${attempt})`);
@@ -1201,7 +1192,16 @@ class ArticleGenerationWorker {
         try {
             const keyPrefix = path.posix.join('users', String(job.user_id));
             const uploadResult = await this.storageService.uploadPdfFromPath(tempFilePath, keyPrefix);
-            logger.info(`Uploaded PDF for job ${job.id} to Cloudflare R2`);
+            logger.info(`Uploaded PDF for job ${job.id} to Cloudflare R2 -> key=${uploadResult.key} url=${uploadResult.url}`);
+
+            try {
+                job.pdf_url = uploadResult.url;
+                await job.save();
+                logger.info(`GenerationJob ${job.id} pdf_url updated to public R2 URL`);
+            } catch (saveErr: any) {
+                logger.warn(`Failed to persist public PDF URL to GenerationJob ${job.id}:`, saveErr?.message || saveErr);
+            }
+
             return uploadResult.url;
         } catch (error) {
             logger.warn(`Failed to upload PDF for job ${job.id} to Cloudflare R2`, error);
@@ -1355,24 +1355,16 @@ class ArticleGenerationWorker {
 
             if (!featuredMediaId && (mediaContext?.imagePath || mediaContext?.imageUrl)) {
                 logger.info(`Uploading featured image for article ${article.id} to WordPress`);
-                const metaSeo = (article.meta && typeof article.meta === 'object' && (article.meta as any).image_seo)
-                    ? (article.meta as any).image_seo
+                const metaSeo = (article.meta && typeof article.meta === 'object' && article.meta.image_seo)
+                    ? article.meta.image_seo
                     : null;
-                const seo = metaSeo && typeof metaSeo === 'object'
-                    ? metaSeo
-                    : this.buildImageSeoFields(
-                        article.title,
-                        this.stripHtml(article.content || '').slice(0, 600)
-                    );
-                const authorIdForMedia = job.wp_config?.author_wp_id || wpUser.samvida_user_id || null;
                 const uploadResult = await this.uploadImageToWordPress(
                     token,
                     mediaContext.imagePath,
                     mediaContext.imageUrl,
                     undefined,
                     undefined,
-                    seo,
-                    authorIdForMedia,
+                    metaSeo
                 );
                 featuredMediaId = uploadResult.mediaId;
                 article.featured_media_wp_id = uploadResult.mediaId;
@@ -1420,7 +1412,6 @@ class ArticleGenerationWorker {
 
     private async getOrCreateCategory(token: string, name: string): Promise<number> {
         try {
-            // First check if category exists
             const searchUrl = this.getWordPressEndpoint(`/wp-json/wp/v2/categories?search=${encodeURIComponent(name)}`);
             const searchRes = await axios.get(searchUrl, {
                 headers: { Authorization: `Bearer ${token}` },
@@ -1428,13 +1419,11 @@ class ArticleGenerationWorker {
             });
 
             if (searchRes.data && Array.isArray(searchRes.data) && searchRes.data.length > 0) {
-                // Return existing category ID
                 const existingCategory = searchRes.data[0];
                 logger.info(`Found existing category: "${name}" with ID ${existingCategory.id}`);
                 return existingCategory.id;
             }
 
-            // Create new category
             const createUrl = this.getWordPressEndpoint('/wp-json/wp/v2/categories');
             const createRes = await axios.post(
                 createUrl,
@@ -1496,7 +1485,6 @@ class ArticleGenerationWorker {
         buffer?: Buffer | null,
         explicitFileName?: string,
         seo?: { title?: string; alt_text?: string; caption?: string; description?: string },
-        authorId?: number | null,
     ): Promise<{ mediaId: number; sourceUrl: string }> {
         if (!imagePath && !fallbackUrl && !buffer) {
             throw new Error('No image available to upload to WordPress');
@@ -1518,17 +1506,12 @@ class ArticleGenerationWorker {
             formData.append('file', Buffer.from(response.data), { filename: fileName });
         }
 
-        // Append SEO/meta fields for the media if provided
         if (seo) {
             const { title, alt_text, caption, description } = seo;
             if (title && title.trim()) formData.append('title', title.trim());
             if (alt_text && alt_text.trim()) formData.append('alt_text', alt_text.trim());
             if (caption && caption.trim()) formData.append('caption', caption.trim());
             if (description && description.trim()) formData.append('description', description.trim());
-        }
-
-        if (authorId !== undefined && authorId !== null) {
-            formData.append('author', String(authorId));
         }
 
         const wpResponse = await axios.post(
@@ -1555,31 +1538,6 @@ class ArticleGenerationWorker {
 
         logger.info(`Uploaded featured image to WordPress media ${mediaId}`);
         return { mediaId, sourceUrl };
-    }
-
-    private buildImageSeoFields(
-        articleTitle: string,
-        context: string
-    ): { title: string; alt_text: string; caption: string; description: string } {
-        const cleanTitle = (articleTitle || '').trim();
-        const baseTitle = cleanTitle.slice(0, 90);
-
-        const text = (context || '').replace(/\s+/g, ' ').trim();
-        const short = text.slice(0, 220);
-        const medium = text.slice(0, 400);
-        const long = text.slice(0, 800);
-
-        const imageTitle = baseTitle ? `${baseTitle} – Illustration` : 'Case Illustration';
-        const altText = baseTitle && short ? `${baseTitle}: ${short}`.slice(0, 140) : (short || 'Illustration for legal article');
-        const caption = baseTitle && medium ? `${baseTitle} – ${medium}`.slice(0, 300) : medium;
-        const description = long;
-
-        return {
-            title: imageTitle,
-            alt_text: altText,
-            caption: caption,
-            description: description,
-        };
     }
 
     private sanitizeWordPressPayload(payload: WordPressPostPayload): Record<string, any> {
