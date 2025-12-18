@@ -802,7 +802,7 @@ class ArticleGenerationWorker {
             throw new Error("Only OpenAI provider supported for PDF");
         }
 
-        const model = modelName || "gpt-4.1-mini";
+        const model = modelName || "gpt-4o";
 
         const fileId = await this.uploadPdfToOpenAI(pdfBuffer, apiKey.api_key);
         logger.info(`PDF uploaded → ${fileId}`);
@@ -956,7 +956,7 @@ class ArticleGenerationWorker {
             throw new Error('Hindi translation currently supports only the OpenAI provider');
         }
 
-        const model = modelName || 'gpt-4.1-mini';
+        const model = modelName || 'gpt-4o';
         const systemPrompt = `You are a professional legal translator. Translate the provided HTML article into Hindi.
             Keep every HTML tag, attribute, number, and formatting exactly the same, only change the human-readable text to Hindi.
             Do not summarize, omit, or add any content.
@@ -1297,7 +1297,7 @@ class ArticleGenerationWorker {
     private resolveModelName(
         primary?: string | null,
         secondary?: string | null,
-        fallback = 'gpt-4.1-mini'
+        fallback = 'gpt-4o'
     ): string {
         const normalizedPrimary = primary?.trim();
         if (normalizedPrimary) {
