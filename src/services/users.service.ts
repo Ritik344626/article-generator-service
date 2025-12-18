@@ -71,13 +71,13 @@ export class UserService {
                 user.user_display_name = user_display_name;
                 user.roles = externalRoles;
                 await user.save();
-                const ourToken = jwt.sign({ id: user.id, email: user.email, role: user.roles }, process.env.JWT_SECRET || 'check', { expiresIn: '7d' });
+                const ourToken = jwt.sign({ id: user.id, email: user.email, role: user.roles }, process.env.JWT_SECRET || 'check', { expiresIn: '15d' });
                 return [null, { user, token: ourToken }];
             }
 
             const newUser: any = { name: user_display_name, email, samvida_token: samvidaToken, samvida_user_id, user_nicename, user_display_name, external_roles: externalRoles ? JSON.stringify(externalRoles) : null, roles: externalRoles };
             const savedUser = await User.create(newUser);
-            const ourToken = jwt.sign({ id: (savedUser as User).id, email: (savedUser as User).email, role: externalRoles }, process.env.JWT_SECRET || 'check', { expiresIn: '7d' });
+            const ourToken = jwt.sign({ id: (savedUser as User).id, email: (savedUser as User).email, role: externalRoles }, process.env.JWT_SECRET || 'check', { expiresIn: '15d' });
             return [null, { user: savedUser, token: ourToken }];
         } catch (error) {
             logger.error('Samvida login error', error);

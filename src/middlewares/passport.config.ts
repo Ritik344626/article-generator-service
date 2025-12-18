@@ -23,8 +23,6 @@ const passportConfig = (passportObj: any) => {
     passportObj.use(new JwtStrategy(options, async (jwtPayload, done) => {
         try {
             const user = await User.findByPk((jwtPayload as any).id);
-            console.log('JWT Payload:', jwtPayload);
-            console.log('Authenticated User:', user);
             if (!user) {
                 return done(null, false, { message: 'Unable to find user' });
             }
