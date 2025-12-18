@@ -58,8 +58,8 @@ class ArticleGenerationWorker {
             connection,
             concurrency: parseInt(process.env.WORKER_CONCURRENCY || '2', 10),
             limiter: {
-                max: 10,
-                duration: 60000,
+                max: 2,
+                duration: 120000,
             },
         });
 
