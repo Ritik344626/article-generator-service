@@ -13,6 +13,7 @@ import path from 'path';
 import { createReadStream } from 'fs';
 import CloudflareR2Service from '../services/storage.service';
 import { GoogleGenAI } from "@google/genai";
+import sharp from 'sharp';
 
 const connection = {
     host: process.env.REDIS_HOST || 'localhost',
@@ -348,9 +349,10 @@ class ArticleGenerationWorker {
 
                 await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 95);
 
-                const englishMeta = this.applySeoDefaults(article.meta, title, sanitizedHtml, article.pdf_url);
-                englishMeta.hindi_translation_article_id = hindiArticle.id;
-                article.meta = englishMeta;
+                if (!article.meta) {
+                    article.meta = {};
+                }
+                article.meta.hindi_translation_article_id = hindiArticle.id;
                 await article.save();
             }
 
@@ -1083,8 +1085,13 @@ class ArticleGenerationWorker {
             }
 
             const cleanBase64 = base64.replace(/\s+/g, "").trim();
+            const originalBuffer = Buffer.from(cleanBase64, "base64");
 
-            return Buffer.from(cleanBase64, "base64");
+            const webpBuffer = await sharp(originalBuffer)
+                .webp({ quality: 90, effort: 4, lossless: false })
+                .toBuffer();
+
+            return webpBuffer;
 
         } catch (error) {
             logger.warn("Failed to generate image", error);
@@ -1132,7 +1139,7 @@ class ArticleGenerationWorker {
 
         const maxAttempts = Number(process.env.WP_IMAGE_UPLOAD_MAX_ATTEMPTS || 3);
         const retryDelayMs = Number(process.env.WP_IMAGE_UPLOAD_RETRY_DELAY_MS || 3000);
-        const fileName = `article-${jobId}-${Date.now()}.png`;
+        const fileName = `article-${jobId}-${Date.now()}.webp`;
         let lastError: any = null;
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -1164,6 +1171,16 @@ class ArticleGenerationWorker {
     private stripHtml(input: string): string {
         return input.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
     }
+
+    private cleanMarkdownCodeFences(html: string): string {
+        if (!html) return html;
+        return html
+            .replace(/^```html\s*\n?/i, '')
+            .replace(/^```\s*\n?/i, '')
+            .replace(/\n?```\s*$/i, '')
+            .trim();
+    }
+    
     private async delay(ms: number): Promise<void> {
         if (ms <= 0) {
             return;
@@ -1274,12 +1291,48 @@ class ArticleGenerationWorker {
     private extractFocusKeyword(title: string): string {
         if (!title) return '';
         
-        const stopWords = ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'];
-        const words = title.toLowerCase().split(/\s+/).filter(word => 
-            word.length > 2 && !stopWords.includes(word)
-        );
+        const stopWords = [
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+            'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+            'vs', 'v', 'versus', 'case', 'article', 'judgment', 'order', 'high', 'court',
+            // Hindi stop words
+            'का', 'के', 'की', 'में', 'से', 'और', 'है', 'को', 'पर', 'ने', 'यह', 'वह'
+        ];
         
-        return words.slice(0, 3).join(' ').trim();
+        const cleaned = title
+            .replace(/[()[\]{}]/g, ' ')
+            .replace(/[–—-]/g, ' ') 
+            .replace(/\s+/g, ' ')
+            .trim();
+        
+        const words = cleaned.split(/\s+/).filter(word => {
+            const lower = word.toLowerCase();
+            return word.length > 2 && !stopWords.includes(lower);
+        });
+        
+        if (words.length === 0) return '';
+        
+        const phrases: string[] = [];
+        
+        for (let i = 0; i < words.length - 1 && phrases.length < 3; i++) {
+            const phrase = `${words[i]} ${words[i + 1]}`;
+            if (phrase.length >= 10 && phrase.length <= 50) {
+                phrases.push(phrase);
+            }
+        }
+        
+        if (phrases.length > 0) {
+            return phrases.join(', ');
+        }
+        
+        const keywords = words
+            .filter(w => w.length >= 4)
+            .slice(0, 5)
+            .join(', ');
+        
+        if (keywords) return keywords;
+        
+        return words.slice(0, 4).join(', ');
     }
 
     private truncateSeoValue(value: string, maxLength: number): string {
@@ -1291,7 +1344,28 @@ class ArticleGenerationWorker {
             return value;
         }
 
-        return value.slice(0, maxLength).trimEnd();
+        const sentenceEnders = ['. ', '? ', '! ', '। ', '؟ ']; 
+        let bestCutoff = -1;
+
+        for (const ender of sentenceEnders) {
+            const lastIndex = value.lastIndexOf(ender, maxLength);
+            if (lastIndex > bestCutoff && lastIndex > maxLength * 0.5) { 
+                bestCutoff = lastIndex + ender.length;
+            }
+        }
+
+        if (bestCutoff > 0) {
+            return value.slice(0, bestCutoff).trimEnd();
+        }
+
+        const truncated = value.slice(0, maxLength);
+        const lastSpaceIndex = truncated.lastIndexOf(' ');
+        
+        if (lastSpaceIndex > maxLength * 0.7) { 
+            return value.slice(0, lastSpaceIndex).trimEnd();
+        }
+
+        return value.slice(0, maxLength).trimEnd() + '...';
     }
 
     private resolveModelName(
@@ -1374,14 +1448,16 @@ class ArticleGenerationWorker {
 
             const wpPostPayload: WordPressPostPayload = {
                 title: article.title,
-                content: article.content,
+                content: this.cleanMarkdownCodeFences(article.content),
                 status: 'draft',
                 author: job.wp_config?.author_wp_id || wpUser.samvida_user_id || null,
                 featured_media: featuredMediaId,
-                meta: this.applySeoDefaults(article.meta, article.title, article.content, article.pdf_url),
+                meta: article.meta,
                 tags: article.tags || job.wp_config?.tags || null,
                 categories: article.categories || job.wp_config?.categories || null,
             };
+
+            logger.info(`Publishing article ${article.id} to WordPress as draft`, wpPostPayload);
 
             const wpPost = await this.createWordPressDraft(token, wpPostPayload);
 
@@ -1492,7 +1568,7 @@ class ArticleGenerationWorker {
 
         const formData = new FormData();
         const fileName = explicitFileName
-            || (imagePath ? path.basename(imagePath) : `article-${Date.now()}.png`);
+            || (imagePath ? path.basename(imagePath) : `article-${Date.now()}.webp`);
 
         if (buffer) {
             formData.append('file', buffer, { filename: fileName });
