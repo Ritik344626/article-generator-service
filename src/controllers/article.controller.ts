@@ -36,34 +36,36 @@ export class ArticleController {
     }
 
     async list(req: Request, res: Response) {
-        try {
-            const authUser = req.user as User;
+    try {
+        const authUser = req.user as User;
 
-            const query = {
-                page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-                limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
-                search: req.query.search as string | undefined,
-                sortBy: req.query.sort_by as any,
-                sortOrder: req.query.sort_order as 'asc' | 'desc' | undefined,
-                type: req.query.type as 'article' | 'job' | undefined,
-                articleStatus: req.query.article_status
-                    ? (req.query.article_status as string).split(',').map((s) => s.trim()).filter(Boolean)
-                    : undefined,
-                jobStatus: req.query.job_status
-                    ? (req.query.job_status as string).split(',').map((s) => s.trim()).filter(Boolean)
-                    : undefined,
-            };
+        const query = {
+            page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+            limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+            search: req.query.search as string | undefined,
+            sortBy: req.query.sort_by as any,
+            sortOrder: req.query.sort_order as 'asc' | 'desc' | undefined,
+            type: req.query.type as 'article' | 'job' | undefined,
+            articleStatus: req.query.article_status
+                ? (req.query.article_status as string).split(',').map((s) => s.trim()).filter(Boolean)
+                : undefined,
+            jobStatus: req.query.job_status
+                ? (req.query.job_status as string).split(',').map((s) => s.trim()).filter(Boolean)
+                : undefined,
+            createdDate: req.query.created_date as string | undefined,
+            userId: req.query.user_id ? parseInt(req.query.user_id as string, 10) : undefined,
+        };
 
-            const payload = await this.feedService.listFeed(query, authUser);
-            return createResponse(res, { status: true, payload });
-        } catch (error: any) {
-            return createResponse(res, {
-                status: false,
-                payload: { message: error.message },
-                code: 400,
-            });
-        }
+        const payload = await this.feedService.listFeed(query, authUser);
+        return createResponse(res, { status: true, payload });
+    } catch (error: any) {
+        return createResponse(res, {
+            status: false,
+            payload: { message: error.message },
+            code: 400,
+        });
     }
+}
 
     async getStats(req: Request, res: Response) {
         try {
