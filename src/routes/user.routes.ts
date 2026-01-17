@@ -18,7 +18,7 @@ const userRouter = Router();
 const userController = new UserController();
 
 userRouter.post('/', validateUserDetails, userController.createUser.bind(userController));
-userRouter.get('/', passport.authenticate('jwt', { session: false }), isAuthorizedRole(['user']), userController.getUsers.bind(userController));
+userRouter.get('/', passport.authenticate('jwt', { session: false }), userController.getUsers.bind(userController));
 userRouter.put('/user/:userId?', passport.authenticate('jwt', { session: false }), isAuthorizedRole(['user']), validateUpdateUserDetails, userController.updateUser.bind(userController));
 userRouter.get('/user/:userId?', passport.authenticate('jwt', { session: false }), isAuthorizedRole(['user']), userController.getUserById.bind(userController));
 userRouter.delete('/user/:userId?', passport.authenticate('jwt', { session: false }), isAuthorizedRole(['user']), userController.deleteUser.bind(userController));

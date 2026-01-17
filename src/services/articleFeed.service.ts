@@ -13,6 +13,8 @@ export interface ArticleFeedQuery {
     type?: 'article' | 'job';
     articleStatus?: string[];
     jobStatus?: string[];
+    createdDate?: string;
+    userId?: number;
 }
 
 interface ArticleFeedRow {
@@ -62,6 +64,18 @@ export class ArticleFeedService {
             baseReplacements.search = `%${search}%`;
             articleFilters.push('(a.title LIKE :search OR a.content LIKE :search)');
             jobFilters.push('(gj.custom_prompt LIKE :search OR gj.prompt_category LIKE :search OR gj.result_preview LIKE :search)');
+        }
+
+        if (query.createdDate) {
+            baseReplacements.createdDate = query.createdDate;
+            articleFilters.push('DATE(a.createdAt) = :createdDate');
+            jobFilters.push('DATE(gj.createdAt) = :createdDate');
+        }
+
+        if (query.userId) {
+            baseReplacements.filteredUserId = query.userId;
+            articleFilters.push('agj.user_id = :filteredUserId');
+            jobFilters.push('gj.user_id = :filteredUserId');
         }
 
         let actualArticleStatus = query.articleStatus;
