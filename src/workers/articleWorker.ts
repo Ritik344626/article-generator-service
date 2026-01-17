@@ -104,7 +104,7 @@ class ArticleGenerationWorker {
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 5);
 
             const { buffer: pdfBuffer, tempFile } = await this.downloadPdf(generationJob);
-            tempFilePath = tempFile; 
+            tempFilePath = tempFile;
             await this.updateJobProgress(generationJob, JobStatus.PROCESSING, 15);
 
             const finalPrompt = await this.buildPromptForPdf(generationJob);
@@ -159,7 +159,7 @@ class ArticleGenerationWorker {
 
             if (imageContextForPrompt.length > 2500) {
                 imageContextForPrompt = imageContextForPrompt.substring(0, 2500);
-}
+            }
 
             let imageResult: { mediaId: number; sourceUrl: string } | null = null;
             const hasImageContext = imageContextForPrompt?.trim().length > 0;
@@ -219,7 +219,7 @@ class ArticleGenerationWorker {
             }
             const wpTags = Array.isArray(generationJob.wp_config?.tags) ? generationJob.wp_config?.tags : [];
             let wpCategories = Array.isArray(generationJob.wp_config?.categories) ? generationJob.wp_config?.categories : [];
-            
+
             // Add generated category IDs if available
             for (const catId of categoryIds) {
                 if (!wpCategories.includes(catId)) {
@@ -251,7 +251,7 @@ class ArticleGenerationWorker {
                     wpTags.push(tId);
                 }
             }
-            
+
             const featuredMediaId = generatedImageMediaId
                 ?? generationJob.wp_config?.featured_media_wp_id
                 ?? null;
@@ -571,7 +571,7 @@ class ArticleGenerationWorker {
         return basePrompt;
     }
 
-    private async selectApiKey(provider : string): Promise<ApiKey | null> {
+    private async selectApiKey(provider: string): Promise<ApiKey | null> {
         const where: any = {
             provider: provider,
             status: 'active',
@@ -931,7 +931,7 @@ class ArticleGenerationWorker {
             }
         } catch (error) {
             logger.warn('Failed to read Gemini response via text()', error);
-        } 
+        }
 
         const candidates = response?.response?.candidates || response?.candidates;
         if (Array.isArray(candidates) && candidates.length > 0) {
@@ -1180,7 +1180,7 @@ class ArticleGenerationWorker {
             .replace(/\n?```\s*$/i, '')
             .trim();
     }
-    
+
     private async delay(ms: number): Promise<void> {
         if (ms <= 0) {
             return;
@@ -1290,7 +1290,7 @@ class ArticleGenerationWorker {
 
     private extractFocusKeyword(title: string): string {
         if (!title) return '';
-        
+
         const stopWords = [
             'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
             'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
@@ -1298,40 +1298,40 @@ class ArticleGenerationWorker {
             // Hindi stop words
             'का', 'के', 'की', 'में', 'से', 'और', 'है', 'को', 'पर', 'ने', 'यह', 'वह'
         ];
-        
+
         const cleaned = title
             .replace(/[()[\]{}]/g, ' ')
-            .replace(/[–—-]/g, ' ') 
+            .replace(/[–—-]/g, ' ')
             .replace(/\s+/g, ' ')
             .trim();
-        
+
         const words = cleaned.split(/\s+/).filter(word => {
             const lower = word.toLowerCase();
             return word.length > 2 && !stopWords.includes(lower);
         });
-        
+
         if (words.length === 0) return '';
-        
+
         const phrases: string[] = [];
-        
+
         for (let i = 0; i < words.length - 1 && phrases.length < 3; i++) {
             const phrase = `${words[i]} ${words[i + 1]}`;
             if (phrase.length >= 10 && phrase.length <= 50) {
                 phrases.push(phrase);
             }
         }
-        
+
         if (phrases.length > 0) {
             return phrases.join(', ');
         }
-        
+
         const keywords = words
             .filter(w => w.length >= 4)
             .slice(0, 5)
             .join(', ');
-        
+
         if (keywords) return keywords;
-        
+
         return words.slice(0, 4).join(', ');
     }
 
@@ -1344,12 +1344,12 @@ class ArticleGenerationWorker {
             return value;
         }
 
-        const sentenceEnders = ['. ', '? ', '! ', '। ', '؟ ']; 
+        const sentenceEnders = ['. ', '? ', '! ', '। ', '؟ '];
         let bestCutoff = -1;
 
         for (const ender of sentenceEnders) {
             const lastIndex = value.lastIndexOf(ender, maxLength);
-            if (lastIndex > bestCutoff && lastIndex > maxLength * 0.5) { 
+            if (lastIndex > bestCutoff && lastIndex > maxLength * 0.5) {
                 bestCutoff = lastIndex + ender.length;
             }
         }
@@ -1360,8 +1360,8 @@ class ArticleGenerationWorker {
 
         const truncated = value.slice(0, maxLength);
         const lastSpaceIndex = truncated.lastIndexOf(' ');
-        
-        if (lastSpaceIndex > maxLength * 0.7) { 
+
+        if (lastSpaceIndex > maxLength * 0.7) {
             return value.slice(0, lastSpaceIndex).trimEnd();
         }
 
@@ -1457,7 +1457,7 @@ class ArticleGenerationWorker {
                 categories: article.categories || job.wp_config?.categories || null,
             };
 
-            logger.info(`Publishing article ${article.id} to WordPress as draft`, wpPostPayload);
+            logger.info(`Publishing article ${article.id} to WordPress as draft`);
 
             const wpPost = await this.createWordPressDraft(token, wpPostPayload);
 
