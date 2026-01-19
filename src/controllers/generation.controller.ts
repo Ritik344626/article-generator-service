@@ -3,13 +3,38 @@ import { validationResult } from 'express-validator';
 import { GenerationService } from '../services/generation.service';
 import { createResponse } from '../utils/utils';
 import { User } from '../models/User';
-import { Article } from '../models/Article';
 
 export class GenerationController {
   private generationService: GenerationService;
 
   constructor() {
     this.generationService = new GenerationService();
+  }
+
+  /**
+   * Validate WordPress JWT token
+   */
+  private async validateWordPressToken(token: string): Promise<boolean> {
+    try {
+      const wpBaseUrl = process.env.WP_BASE_URL || 'https://www.samvidalaw.com';
+      const response = await fetch(`${wpBaseUrl}/wp-json/jwt-auth/v1/token/validate`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        signal: AbortSignal.timeout(10000)
+      });
+
+      if (response.ok) {
+        return true;
+      } else {
+        return false;
+      }
+    } catch (error: any) {
+      console.error('WordPress token validation failed:', error?.message || error);
+      return false;
+    }
   }
 
   async createJob(req: Request, res: Response) {
@@ -20,14 +45,40 @@ export class GenerationController {
       }
 
       const authUser = req.user as User;
-      
+
+      if (!authUser.samvida_token || authUser.samvida_token.trim() === '') {
+        return createResponse(res, {
+          status: false,
+          payload: {
+            message: 'WordPress authentication required. Please login again.',
+            requires_reauth: true
+          },
+          code: 401
+        });
+      }
+
+      const isTokenValid = await this.validateWordPressToken(authUser.samvida_token);
+
+      if (!isTokenValid) {
+        authUser.samvida_token = '';
+        await authUser.save();
+
+        return createResponse(res, {
+          status: false,
+          payload: {
+            message: 'WordPress session has expired. Please login again.',
+            requires_reauth: true
+          },
+          code: 401
+        });
+      }
       // Convert relative path to absolute path if file was uploaded
       let pdfFilePath: string | undefined = undefined;
       if (req.file) {
         const path = await import('path');
         pdfFilePath = path.resolve(req.file.path);
       }
-      
+
       const input = {
         pdf_url: req.body.pdf_url,
         pdf_file_path: pdfFilePath,
@@ -54,7 +105,7 @@ export class GenerationController {
         const monthlyLimit = Number((apiKey as any)?.credits_monthly_limit_usd ?? 100);
         const remaining = Number((apiKey as any)?.credits_remaining_usd_month ?? monthlyLimit);
         lowCreditWarning = remaining <= monthlyLimit * 0.2;
-      } catch {}
+      } catch { }
 
       return createResponse(res, {
         status: true,
