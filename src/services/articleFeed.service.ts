@@ -13,7 +13,8 @@ export interface ArticleFeedQuery {
     type?: 'article' | 'job';
     articleStatus?: string[];
     jobStatus?: string[];
-    createdDate?: string;
+    fromDate?: string;
+    toDate?: string;
     userId?: number;
 }
 
@@ -60,16 +61,30 @@ export class ArticleFeedService {
         const jobFilters: string[] = [];
         const baseReplacements: Record<string, any> = {};
 
+        const fromDate = query.fromDate?.trim();
+        const toDate = query.toDate?.trim();
+        const fromDateTime = fromDate ? `${fromDate} 00:00:00` : undefined;
+        const toDateTime = toDate ? `${toDate} 23:59:59` : undefined;
+
         if (search) {
             baseReplacements.search = `%${search}%`;
             articleFilters.push('(a.title LIKE :search OR a.content LIKE :search)');
             jobFilters.push('(gj.custom_prompt LIKE :search OR gj.prompt_category LIKE :search OR gj.result_preview LIKE :search)');
         }
 
-        if (query.createdDate) {
-            baseReplacements.createdDate = query.createdDate;
-            articleFilters.push('DATE(a.createdAt) = :createdDate');
-            jobFilters.push('DATE(gj.createdAt) = :createdDate');
+        if (fromDateTime && toDateTime) {
+            baseReplacements.fromDateTime = fromDateTime;
+            baseReplacements.toDateTime = toDateTime;
+            articleFilters.push('a.createdAt BETWEEN :fromDateTime AND :toDateTime');
+            jobFilters.push('gj.createdAt BETWEEN :fromDateTime AND :toDateTime');
+        } else if (fromDateTime) {
+            baseReplacements.fromDateTime = fromDateTime;
+            articleFilters.push('a.createdAt >= :fromDateTime');
+            jobFilters.push('gj.createdAt >= :fromDateTime');
+        } else if (toDateTime) {
+            baseReplacements.toDateTime = toDateTime;
+            articleFilters.push('a.createdAt <= :toDateTime');
+            jobFilters.push('gj.createdAt <= :toDateTime');
         }
 
         if (query.userId) {

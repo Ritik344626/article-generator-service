@@ -52,7 +52,8 @@ export class ArticleController {
             jobStatus: req.query.job_status
                 ? (req.query.job_status as string).split(',').map((s) => s.trim()).filter(Boolean)
                 : undefined,
-            createdDate: req.query.created_date as string | undefined,
+            fromDate: req.query.from_Date as string | undefined,
+            toDate: req.query.to_Date as string | undefined,
             userId: req.query.user_id ? parseInt(req.query.user_id as string, 10) : undefined,
         };
 
